@@ -201,9 +201,10 @@ class EventHandlers:
 
             self.update_chat_time(player_name)
 
-            if not event.is_cancelled:
-                display_name = self._resolve_display_name(player)
-                self.plugin.api_send_event("chat", display_name, player_name, message)
+            # ARCCore cancels PlayerChatEvent to rebroadcast styled chat; still
+            # forward to QQ here (spam/cooldown already returned above).
+            display_name = self._resolve_display_name(player)
+            self.plugin.api_send_event("chat", display_name, player_name, message)
 
         except Exception as e:
             self.logger.error(f"处理玩家聊天事件失败: {e}")
