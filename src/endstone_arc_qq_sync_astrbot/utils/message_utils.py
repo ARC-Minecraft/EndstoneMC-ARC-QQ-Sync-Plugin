@@ -281,85 +281,18 @@ def truncate_message(message: str, max_length: int = 500) -> str:
     return message[:max_length - 3] + "..."
 
 
-def _decode_sensitive_words():
-    """解码敏感词列表"""
-    import base64
-    
-    # Base64编码的敏感词数据
-    encoded_data = [
-        '5Lmg6L+R5bmz', '5q+b5rO95Lic', '6YKT5bCP5bmz', '5rGf5rO95rCR', '6IOh6ZSm5rab', '5p2O5YWL5by6',
-        '5Lit5Y2X5rW3', '5aSp5a6J6Zeo', '5YWt5Zub', 'NjQ=', '5rOV6L2u5Yqf', '5aSn5rOV',
-        '5rCR6L+Q', '5Y+w54us', '6JeP54us', '55aG54us', 'ZnVjaw==', 'c2hpdA==',
-        '5YWx5Lqn5YWa', '5rCR5Li7', '6Ieq55Sx', '5Lq65p2D', '5pq05pS/', '54us6KOB',
-        '5pS/5bqc', '5a6Y5ZGY', '6IWQ6LSl', '5Y+N5YWa', '6YCg5Y+N', '6Z2p5ZG9',
-        '6Imy5oOF', '5rer56e9', '6buE6Imy', '6KO45L2T', '5oCn54ix', '5YGa54ix',
-        '5by65aW4', '6L2u5aW4', '5oCn5Lqk', '6Zi06YGT', '6Zi06IyO', '5Lmz5oi/',
-        '5oCn5Zmo5a6Y', '5omL5rer', '6Ieq5oWw', '5Y+j5Lqk', '6IKb5Lqk', '576k5Lqk',
-        'YXY=', '5oiQ5Lq6', '5LiJ57qn', '5oOF6Imy', '5r+A5oOF', '6K+x5oOR',
-        '5bqK5oiP', '5pil6I2v', '5YKs5oOF', '5aOu6Zyz', '5oCn55eF', '5qKF5q+S',
-        '5p2A5Lq6', '6LCL5p2A', '5pqX5p2A', '5p6q5Ye7', '54iG54K4', '5oGQ5oCW',
-        '6KGA6IWl', '5pq05Yqb', '5q275Lqh', '6Ieq5p2A', '5LuW5p2A', '5bGg5p2A',
-        '56CN5aS0', '5Ymy5ZaJ', '5Yi65p2A', '5q+S5p2A', '54K45by5', '5omL5qa05by5',
-        '6LWM5Y2a', '6LWM5Zy6', '5Y2a5b2p', '5b2p56Wo', '5YWt5ZCI5b2p', '5pe25pe25b2p',
-        '6LWM6ZKx', '6LWM5rOo', '5LiL5rOo', '5oq85rOo', '5byA55uY', '5bqE5a62',
-        '6ICB6JmO5py6', '55m+5a625LmQ', 'MjHngrk=', '5b635bee5omR5YWL', '6K+I6aqX', '6aqX6ZKx',
-        '5Lyg6ZSA', '6Z2e5rOV6ZuG6LWE', '5rSX6ZKx', '6buR6ZKx', '6auY5Yip6LS3', '5YCf6LS3',
-        '5aWx6Lev6LS3', '5qCh5Zut6LS3', '6KO46LS3', '572R6LS3', '5Yi35Y2V', '5YW86IGM',
-        '5Luj5Yi3', '6L+U5Yip', '5q+S5ZOB', '5aSn6bq7', '5rW35rSb5Zug', '5Yaw5q+S',
-        '5pGH5aS05Li4', 'a+eyiQ==', '5Y+v5Y2h5Zug', '6bim54mH', '5ZCX5ZWh', '6bq76YaJ5YmC',
-        '5YW05aWL5YmC', '6Ie05bm75YmC', '6Ieq5q6L', '6Ieq5Lyk', '5Ymy6IWV', '6Lez5qW8',
-        '5LiK5ZCK', '5pyN5q+S', '6YKq5pWZ', '6L+35L+h', '5Y2g5Y2c', '566X5ZG9',
-        '6aOG5rC0', '56Se5amG',
-    ]
-    
-    # 解码敏感词
-    words = set()
-    for encoded in encoded_data:
-        try:
-            decoded = base64.b64decode(encoded).decode('utf-8')
-            words.add(decoded)
-        except:
-            continue
-    
-    return words
-
-
-def get_sensitive_words():
-    """获取敏感词集合"""
-    return _decode_sensitive_words()
-
-
 def filter_sensitive_content(text: str, custom_ban_words=None) -> tuple:
-    """
-    过滤敏感内容，用于游戏消息转发到QQ
-    
+    """No-op: keyword filtering disabled; return original text.
+
     Args:
-        custom_ban_words: 自定义敏感词
-        text (str): 原始文本
-        
+        text: Original text.
+        custom_ban_words: Ignored; kept for call-site compatibility.
+
     Returns:
-        tuple: (过滤后的文本, 是否包含敏感内容)
+        Tuple of (text, False).
     """
-    if custom_ban_words is None:
-        custom_ban_words = []
-    if not text:
-        return text, False
-    
-    sensitive_words = get_sensitive_words()
-    # 合并自定义敏感词
-    if custom_ban_words:
-        sensitive_words.update(custom_ban_words)
-    has_sensitive = False
-    
-    # 检查并替换敏感词
-    for word in sensitive_words:
-        if word.lower() in text.lower():
-            has_sensitive = True
-            # 使用正则表达式进行大小写不敏感的替换
-            replacement = '*' * len(word)
-            text = re.sub(re.escape(word), replacement, text, flags=re.IGNORECASE)
-    
-    return text, has_sensitive
+    _ = custom_ban_words
+    return text, False
 
 
 def format_qq_group_chat_game_message(
