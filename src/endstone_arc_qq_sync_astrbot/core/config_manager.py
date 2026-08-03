@@ -27,7 +27,7 @@ class ConfigManager:
             "chat_count_limit": 20,
             "chat_ban_time": 300,
             "hub_host": "127.0.0.1",
-            "hub_port": 19135,
+            "hub_port": 19136,
             "hub_token": "",
             "cross_server_broadcast": True,
         }

@@ -139,7 +139,7 @@ class ArcQQSyncAstrbot(Plugin):
         self._capture_legacy_binding_snapshot_if_any()
         self.data_manager.enable_remote_hub_mode(True)
         hub_host = self.config_manager.get_config("hub_host", "127.0.0.1")
-        hub_port = self.config_manager.get_config("hub_port", 19135)
+        hub_port = self.config_manager.get_config("hub_port", 19136)
         self.logger.info(
             f"连接弧光消息中心 ws://{hub_host}:{hub_port} ..."
         )
@@ -308,9 +308,7 @@ class ArcQQSyncAstrbot(Plugin):
         is_remote = bool(source_server_name and source_server_name != self.server_name)
         stats = None
         if not is_remote:
-            stats = self.data_manager.get_player_playtime_info(
-                raw_player_name, self.server.online_players
-            )
+            stats = self.get_player_stats(raw_player_name)
 
         session_count = None
         playtime_str = ""
@@ -345,22 +343,26 @@ class ArcQQSyncAstrbot(Plugin):
 
     def get_player_stats(self, raw_player_name: str) -> dict:
         """
-        获取玩家统计信息 API — 供外部插件查询。
+        获取玩家统计信息 API — 委托 ARCCore。
 
         :param raw_player_name: 原始玩家名
         :return: {"session_count": int, "total_playtime": int(秒), "is_online": bool,
                   "last_join_time": timestamp, "last_quit_time": timestamp}
         """
-        info = self.data_manager.get_player_playtime_info(raw_player_name, self.server.online_players)
-        if not info:
-            return {
-                "session_count": 0,
-                "total_playtime": 0,
-                "is_online": False,
-                "last_join_time": None,
-                "last_quit_time": None,
-            }
-        return info
+        empty = {
+            "session_count": 0,
+            "total_playtime": 0,
+            "is_online": False,
+            "last_join_time": None,
+            "last_quit_time": None,
+        }
+        try:
+            arc = self.server.plugin_manager.get_plugin("arc_core")
+            if arc is not None and hasattr(arc, "api_get_player_playtime"):
+                return arc.api_get_player_playtime(raw_player_name=raw_player_name) or empty
+        except Exception as e:
+            self.logger.debug(f"get_player_stats via ARCCore failed: {e}")
+        return empty
 
     def _format_event_message(self, event_type: str, display_name: str,
                               raw_player_name: str, message: str,
@@ -374,9 +376,7 @@ class ArcQQSyncAstrbot(Plugin):
         is_remote = bool(source_server_name and source_server_name != self.server_name)
         stats = None
         if not is_remote:
-            stats = self.data_manager.get_player_playtime_info(
-                raw_player_name, self.server.online_players
-            )
+            stats = self.get_player_stats(raw_player_name)
 
         if event_type == "join":
             session_count = stats.get("session_count", 0) if stats else None
@@ -411,17 +411,12 @@ class ArcQQSyncAstrbot(Plugin):
     def notify_arc_qq_chat(
         self, display_name: str, message: str, group_name: str = ""
     ) -> None:
+        """Deprecated no-op.
+
+        Cross-server QQ chat fan-out is handled by AstrBot hub via HubClient,
+        not ARCCore SyncServer.
         """
-        通知 ARC Core 经同步中心把 QQ 群聊下发到 QQ_RELAY_MODE=host 的子服。
-        主机本机玩家仍由本插件广播；无 SyncServer 时此调用为空操作。
-        """
-        try:
-            arc = self.server.plugin_manager.get_plugin("arc_core")
-            if arc is None or not hasattr(arc, "api_broadcast_qq_chat"):
-                return
-            arc.api_broadcast_qq_chat(display_name, message, group_name or "")
-        except Exception as e:
-            self.logger.debug(f"notify_arc_qq_chat: {e}")
+        _ = (display_name, message, group_name)
 
     def _send_text_to_qq(self, text: str) -> bool:
         """内部方法：通过弧光消息中心发送文本到 QQ 群。"""
@@ -453,17 +448,8 @@ class ArcQQSyncAstrbot(Plugin):
                 except Exception as msg_error:
                     self.logger.warning(f"发送关闭消息失败（这是正常的）: {msg_error}")
 
-            # 保存数据（经消息中心集中存储：关服前把本机在线玩家的计时同步）
+            # 保存绑定数据（游戏时长已迁至 ARCCore）
             if hasattr(self, 'data_manager'):
-                if getattr(self, '_hub_client', None):
-                    try:
-                        for p in list(self.server.online_players):
-                            self.data_manager.stop_player_timer(p.name)
-                            self.data_manager.update_player_quit(p.name)
-                    except Exception as e:
-                        self.logger.warning(f"向消息中心同步在线时长与离场时间失败: {e}")
-                else:
-                    self.data_manager.cleanup_timer_system()
                 self.data_manager.save_data()
 
             if hasattr(self, '_hub_client') and self._hub_client:

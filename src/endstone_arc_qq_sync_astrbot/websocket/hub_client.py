@@ -21,7 +21,7 @@ class HubClient:
 
         # Hub 连接信息
         self.hub_host = plugin.config_manager.get_config("hub_host", "127.0.0.1")
-        self.hub_port = plugin.config_manager.get_config("hub_port", 19135)
+        self.hub_port = plugin.config_manager.get_config("hub_port", 19136)
         self.token = plugin.config_manager.get_config("hub_token", "")
         self.server_name = plugin.server_name
 

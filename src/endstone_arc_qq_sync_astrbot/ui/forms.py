@@ -84,11 +84,11 @@ class UIManager:
                 player.send_message(f"{ColorFormat.GRAY}[ARC QQ Sync] {ColorFormat.RED}该QQ号已被玩家 {existing_player} 绑定！{ColorFormat.RESET}")
                 return
 
-        # 群成员校验依赖中心侧能力；子服本地缓存为空时跳过
-        if self.plugin.group_members and qq_input not in self.plugin.group_members:
-            player.send_message(f"{ColorFormat.GRAY}[ARC QQ Sync] {ColorFormat.RED}该QQ号未加入QQ群，无法绑定！{ColorFormat.RESET}")
-            player.send_message(f"{ColorFormat.GRAY}[ARC QQ Sync] {ColorFormat.YELLOW}请先加入QQ群后再试{ColorFormat.RESET}")
-            return
+            # 群成员校验依赖中心侧能力；子服本地缓存为空时跳过
+            if self.plugin.group_members and qq_input not in self.plugin.group_members:
+                player.send_message(f"{ColorFormat.GRAY}[ARC QQ Sync] {ColorFormat.RED}该QQ号未加入QQ群，无法绑定！{ColorFormat.RESET}")
+                player.send_message(f"{ColorFormat.GRAY}[ARC QQ Sync] {ColorFormat.YELLOW}请先加入QQ群后再试{ColorFormat.RESET}")
+                return
 
             # 直接绑定
             if self.plugin.data_manager.bind_player_qq(player.name, player.xuid, qq_input):

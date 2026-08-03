@@ -832,44 +832,35 @@ async def _handle_group_command(
                     else:
                         reply += "封禁状态: 正常 ✅\n"
                     
-                    # 添加游戏统计信息
+                    # 游戏统计来自 ARCCore SQLite
                     reply += "\n📊 游戏统计:\n"
-                    
-                    # 游戏时长
-                    total_playtime = player_data.get("total_playtime", 0)
+                    stats = _plugin_instance.get_player_stats(target_player)
+                    total_playtime = int(stats.get("total_playtime") or 0)
                     if total_playtime > 0:
-                        playtime_str = format_playtime(total_playtime)
-                        reply += f"总游戏时长: {playtime_str}\n"
+                        reply += f"总游戏时长: {format_playtime(total_playtime)}\n"
                     else:
                         reply += "总游戏时长: 无记录\n"
-                    
-                    # 会话统计
-                    session_count = player_data.get("session_count", 0)
+                    session_count = int(stats.get("session_count") or 0)
                     reply += f"登录次数: {session_count}次\n"
-                    
-                    # 最后登录时间
-                    last_join_time = player_data.get("last_join_time")
-                    if last_join_time:
+
+                    def _fmt_stat_time(v):
+                        if not v:
+                            return None
                         try:
-                            last_join_dt = datetime.datetime.fromtimestamp(last_join_time)
-                            last_join_str = TimeUtils.format_datetime(last_join_dt)
-                            reply += f"最后登录: {last_join_str}\n"
-                        except (ValueError, TypeError):
-                            reply += f"最后登录: 时间格式错误\n"
-                    else:
-                        reply += "最后登录: 无记录\n"
-                    
-                    # 最后退出时间
-                    last_quit_time = player_data.get("last_quit_time")
-                    if last_quit_time:
-                        try:
-                            last_quit_dt = datetime.datetime.fromtimestamp(last_quit_time)
-                            last_quit_str = TimeUtils.format_datetime(last_quit_dt)
-                            reply += f"最后退出: {last_quit_str}\n"
-                        except (ValueError, TypeError):
-                            reply += f"最后退出: 时间格式错误\n"
-                    else:
-                        reply += "最后退出: 无记录\n"
+                            if isinstance(v, (int, float)):
+                                return TimeUtils.format_datetime(datetime.datetime.fromtimestamp(v))
+                            s = str(v)
+                            try:
+                                return TimeUtils.format_datetime(datetime.datetime.fromisoformat(s))
+                            except ValueError:
+                                return s
+                        except (ValueError, TypeError, OSError):
+                            return None
+
+                    last_join_str = _fmt_stat_time(stats.get("last_join_time"))
+                    reply += f"最后登录: {last_join_str or '无记录'}\n"
+                    last_quit_str = _fmt_stat_time(stats.get("last_quit_time"))
+                    reply += f"最后退出: {last_quit_str or '无记录'}\n"
                     
                     # 绑定历史
                     reply += "\n🔗 绑定历史:\n"

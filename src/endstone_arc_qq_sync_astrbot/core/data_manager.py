@@ -24,8 +24,7 @@ class DataManager:
         self._auto_save_enabled = True
         
         # 进服时间记录（玩家名 -> 进服时间戳），用于在离开时计算在线时长
-        self._online_timer_start_times: Dict[str, int] = {}
-        
+                
         self._init_binding_data()
     
     def _init_binding_data(self):
@@ -135,10 +134,6 @@ class DataManager:
         src = f"[{source_server}] " if source_server else ""
         stats = {"created": 0, "merged": 0, "skipped": 0}
         required_fields = {
-            "total_playtime": 0,
-            "last_join_time": None,
-            "last_quit_time": None,
-            "session_count": 0,
         }
 
         for key, inc in snapshot.items():
@@ -178,10 +173,6 @@ class DataManager:
         if not isinstance(player_data, dict):
             return "skipped"
         required_fields = {
-            "total_playtime": 0,
-            "last_join_time": None,
-            "last_quit_time": None,
-            "session_count": 0,
         }
         inc = json.loads(json.dumps(player_data))
         name = str(player_name)
@@ -208,8 +199,7 @@ class DataManager:
         self.save_data()
 
     def _merge_legacy_into_existing(self, hub: dict, inc: dict, name: str) -> None:
-        hub["total_playtime"] = int(hub.get("total_playtime") or 0) + int(inc.get("total_playtime") or 0)
-        hub["session_count"] = int(hub.get("session_count") or 0) + int(inc.get("session_count") or 0)
+        # playtime/session_count owned by ARCCore SQLite — do not merge into binding JSON
 
         hub["last_join_time"] = self._max_optional_ts(
             hub.get("last_join_time"), inc.get("last_join_time")
@@ -271,10 +261,6 @@ class DataManager:
         for player_name, data in self._binding_data.items():
             # 添加缺失的字段，仅做补全，不做删除
             required_fields = {
-                "total_playtime": 0,
-                "last_join_time": None,
-                "last_quit_time": None,
-                "session_count": 0
             }
             
             for field, default_value in required_fields.items():
@@ -457,10 +443,6 @@ class DataManager:
                 "xuid": player_xuid,
                 "qq": qq_clean,
                 "bind_time": int(TimeUtils.get_timestamp()),
-                "total_playtime": 0,
-                "last_join_time": None,
-                "last_quit_time": None,
-                "session_count": 0
             }
             self.logger.info(f"玩家 {player_name} 已绑定QQ: {qq_clean}")
         
@@ -529,88 +511,34 @@ class DataManager:
         return False
     
     # 游戏统计相关方法
-    def update_player_join(self, player_name: str, player_xuid: str = None):
-        """更新玩家加入时间和进服次数（为所有玩家记录，不检查QQ绑定）"""
-        if self._use_remote():
-            self._rpc_safe(
-                "update_player_join",
-                {"player_name": player_name, "player_xuid": player_xuid},
-                None,
-            )
+    def update_player_join(self, player_name: str, player_xuid: str = None) -> None:
+        """Deprecated: playtime/session_count live in ARCCore DB."""
+        if self._hub_mode:
+            self._rpc("update_player_join", player_name=player_name, player_xuid=player_xuid)
             return
-        current_time = int(TimeUtils.get_timestamp())
-        
-        # 确保玩家数据存在，如果不存在则创建
-        if player_name not in self._binding_data:
-            self._binding_data[player_name] = {
-                "name": player_name,
-                "xuid": player_xuid or "",
-                "qq": "",
-                "total_playtime": 0,
-                "last_join_time": current_time,
-                "last_quit_time": None,
-                "session_count": 0
-            }
-        
-        # 更新加入时间和会话计数
-        self._binding_data[player_name]["last_join_time"] = current_time
-        self._binding_data[player_name]["session_count"] = self._binding_data[player_name].get("session_count", 0) + 1
-        
-        # 更新XUID（如果提供了新的XUID）
-        if player_xuid and not self._binding_data[player_name].get("xuid"):
-            self._binding_data[player_name]["xuid"] = player_xuid
-        
-        self.trigger_save(f"玩家加入: {player_name}")
-    
-    def update_player_quit(self, player_name: str):
-        """更新玩家离开时间（在线时长已在 stop_player_timer 中根据进服时间计算并累加）"""
-        if self._use_remote():
-            self._rpc_safe("update_player_quit", {"player_name": player_name}, None)
+        return
+
+
+    def update_player_quit(self, player_name: str) -> None:
+        """Deprecated: playtime lives in ARCCore DB."""
+        if self._hub_mode:
+            self._rpc("update_player_quit", player_name=player_name)
             return
-        if player_name not in self._binding_data:
-            return
-        current_time = int(TimeUtils.get_timestamp())
-        self._binding_data[player_name]["last_quit_time"] = current_time
-        self.trigger_save(f"玩家离开: {player_name}")
-    
-    def get_player_playtime_info(self, player_name: str, online_players: List[Any]) -> Dict[str, Any]:
-        """使用计时器系统获取玩家在线时间信息"""
-        if self._use_remote():
-            r = self._rpc_safe(
-                "get_player_playtime_info",
-                {"player_name": player_name},
-                {},
-            )
-            return r if isinstance(r, dict) else {}
-        if player_name not in self._binding_data:
-            return {}
-        
-        data = self._binding_data[player_name]
-        
-        current_time = int(TimeUtils.get_timestamp())
-        total_playtime = data.get("total_playtime", 0)
-        
-        # 检查玩家是否在线且正在计时
-        is_online = False
-        current_session_time = 0
-        if player_name in self._online_timer_start_times:
-            is_online = True
-            start_time = self._online_timer_start_times[player_name]
-            current_session_time = current_time - start_time
-        
-        total_with_current = total_playtime + current_session_time
-        
+        return
+
+
+    def get_player_playtime_info(self, player_name: str, online_players: List[Any] = None) -> Dict[str, Any]:
+        """Deprecated: use ARCCore.api_get_player_playtime instead."""
+        _ = online_players
         return {
-            "total_playtime": total_with_current,
-            "session_count": data.get("session_count", 0),
-            "last_join_time": data.get("last_join_time"),
-            "last_quit_time": data.get("last_quit_time"),
-            "is_online": is_online,
-            "current_session_time": current_session_time,
-            "bind_time": data.get("bind_time")
+            "session_count": 0,
+            "total_playtime": 0,
+            "is_online": False,
+            "last_join_time": None,
+            "last_quit_time": None,
         }
-    
-    # 封禁相关方法
+
+
     def is_player_banned(self, player_name: str) -> bool:
         """检查玩家是否被封禁"""
         if self._use_remote():
@@ -644,10 +572,6 @@ class DataManager:
                 "name": player_name,
                 "xuid": "",
                 "qq": "",
-                "total_playtime": 0,
-                "last_join_time": None,
-                "last_quit_time": None,
-                "session_count": 0
             }
         
         # 设置封禁状态
@@ -826,53 +750,18 @@ class DataManager:
 
     # 在线时长：进服时记录时间，离服时根据内存中的进服时间计算本次时长并累加
     def start_player_timer(self, player_name: str, player_xuid: str = None):
-        """记录玩家进服时间（在 PlayerJoinEvent 中调用）"""
-        if self._use_remote():
-            self._rpc_safe(
-                "start_player_timer",
-                {"player_name": player_name, "player_xuid": player_xuid},
-                None,
-            )
-            return
-        if player_name in self._online_timer_start_times:
-            return
-        current_time = int(TimeUtils.get_timestamp())
-        self._online_timer_start_times[player_name] = current_time
-        if player_name not in self._binding_data:
-            self._binding_data[player_name] = {
-                "name": player_name,
-                "xuid": player_xuid or "",
-                "qq": "",
-                "total_playtime": 0,
-                "last_join_time": current_time,
-                "last_quit_time": None,
-                "session_count": 0
-            }
-        if player_xuid and not self._binding_data[player_name].get("xuid"):
-            self._binding_data[player_name]["xuid"] = player_xuid
+        """Deprecated no-op — ARCCore tracks session timers."""
+        _ = (player_name, player_xuid)
+        return
+
 
     def stop_player_timer(self, player_name: str):
-        """根据进服时间计算本次在线时长并累加到 total_playtime（在 PlayerQuitEvent 中调用）"""
-        if self._use_remote():
-            self._rpc_safe("stop_player_timer", {"player_name": player_name}, None)
-            return
-        if player_name not in self._online_timer_start_times:
-            return
-        start_time = self._online_timer_start_times[player_name]
-        current_time = int(TimeUtils.get_timestamp())
-        session_time = current_time - start_time
-        if session_time > 0 and player_name in self._binding_data:
-            self._binding_data[player_name]["total_playtime"] = self._binding_data[player_name].get("total_playtime", 0) + session_time
-        del self._online_timer_start_times[player_name]
+        """Deprecated no-op — ARCCore tracks session timers."""
+        _ = player_name
+        return
+
 
     def cleanup_timer_system(self):
-        """插件禁用时，对仍在内存中的进服记录做一次离服结算并保存"""
-        if self._use_remote():
-            return
-        if not self._online_timer_start_times:
-            return
-        self.logger.info("正在清理在线时长记录...")
-        for player_name in list(self._online_timer_start_times.keys()):
-            self.stop_player_timer(player_name)
-        self.save_data()
-        self.logger.info("在线时长记录已清理并保存")
+        """Deprecated no-op — ARCCore settles playtime on disable."""
+        return
+
