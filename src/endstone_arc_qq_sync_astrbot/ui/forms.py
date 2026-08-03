@@ -84,12 +84,11 @@ class UIManager:
                 player.send_message(f"{ColorFormat.GRAY}[ARC QQ Sync] {ColorFormat.RED}该QQ号已被玩家 {existing_player} 绑定！{ColorFormat.RESET}")
                 return
 
-            # 检查QQ号对应的用户是否在群里
-            if hasattr(self.plugin, 'group_members') and self.plugin.group_members:
-                if qq_input not in self.plugin.group_members:
-                    player.send_message(f"{ColorFormat.GRAY}[ARC QQ Sync] {ColorFormat.RED}该QQ号未加入QQ群，无法绑定！{ColorFormat.RESET}")
-                    player.send_message(f"{ColorFormat.GRAY}[ARC QQ Sync] {ColorFormat.YELLOW}请先加入QQ群后再试{ColorFormat.RESET}")
-                    return
+        # 群成员校验依赖中心侧能力；子服本地缓存为空时跳过
+        if self.plugin.group_members and qq_input not in self.plugin.group_members:
+            player.send_message(f"{ColorFormat.GRAY}[ARC QQ Sync] {ColorFormat.RED}该QQ号未加入QQ群，无法绑定！{ColorFormat.RESET}")
+            player.send_message(f"{ColorFormat.GRAY}[ARC QQ Sync] {ColorFormat.YELLOW}请先加入QQ群后再试{ColorFormat.RESET}")
+            return
 
             # 直接绑定
             if self.plugin.data_manager.bind_player_qq(player.name, player.xuid, qq_input):
@@ -97,19 +96,17 @@ class UIManager:
                 player.send_message(f"{ColorFormat.GRAY}[ARC QQ Sync] {ColorFormat.GREEN}[成功] QQ绑定成功！{ColorFormat.RESET}")
                 player.send_message(f"{ColorFormat.GRAY}[ARC QQ Sync] {ColorFormat.AQUA}您的QQ {qq_input} 已与游戏账号绑定{ColorFormat.RESET}")
 
-                # 发送QQ群播报并设置群名片
-                if hasattr(self.plugin, '_current_ws') and self.plugin._current_ws:
-                    from ..websocket.handlers import send_group_msg_with_at, set_group_card_in_all_groups
-                    asyncio.run_coroutine_threadsafe(
-                        send_group_msg_with_at(self.plugin._current_ws, group_id=int(self.plugin.config_manager.get_config("target_groups", [0])[0]),
-                                               user_id=int(qq_input), text=f"玩家 {player.name} 已成功绑定QQ！"),
-                        self.plugin._loop
+                # 通过消息中心播报绑定成功
+                client = getattr(self.plugin, "_hub_client", None)
+                if client and getattr(self.plugin, "_loop", None):
+                    text = (
+                        f"[{self.plugin.server_name}]\n"
+                        f"玩家 {player.name} 已成功绑定 QQ {qq_input}！"
                     )
-                    if self.plugin.config_manager.get_config("sync_group_card", True):
-                        asyncio.run_coroutine_threadsafe(
-                            set_group_card_in_all_groups(self.plugin._current_ws, user_id=int(qq_input), card=player.name),
-                            self.plugin._loop
-                        )
+                    asyncio.run_coroutine_threadsafe(
+                        client.send_api_message(text),
+                        self.plugin._loop,
+                    )
             else:
                 player.send_message(f"{ColorFormat.GRAY}[ARC QQ Sync] {ColorFormat.RED}绑定失败，请重试！{ColorFormat.RESET}")
 

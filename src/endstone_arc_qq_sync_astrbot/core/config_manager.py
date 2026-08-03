@@ -20,22 +20,16 @@ class ConfigManager:
         self._color_format = None
         self.default_config = {
             "server_name": "",
-            "napcat_ws": "ws://127.0.0.1:3001",
-            "access_token": "",
-            "target_groups": ["712523104"],
-            "group_names": {},
-            "admins": ["2899659758"],
+            "admins": ["593405016"],
             "force_bind_qq": False,
             "sync_group_card": True,
             "check_group_member": False,
             "chat_count_limit": 20,
             "chat_ban_time": 300,
-            "api_qq_enable": False,
-            "hub_is_hub": True,
             "hub_host": "127.0.0.1",
-            "hub_port": 19321,
+            "hub_port": 19135,
             "hub_token": "",
-            "cross_server_broadcast": True
+            "cross_server_broadcast": True,
         }
         self._init_config()
         self._init_custom_ban_words()
@@ -66,7 +60,7 @@ class ConfigManager:
             self._config = self.default_config.copy()
         
         config_updated = False
-        config_updated |= self._migrate_hub_config_keys()
+        config_updated |= self._migrate_obsolete_keys()
         
         # 检查并合并新的配置项
         for key, value in self.default_config.items():
@@ -74,23 +68,6 @@ class ConfigManager:
                 self._config[key] = value
                 config_updated = True
                 self.logger.info(f"添加新配置项: {key}")
-        
-        # 兼容旧配置格式 - 如果存在target_group单个配置，转换为target_groups数组
-        if "target_group" in self._config:
-            if "target_groups" not in self._config:
-                self._config["target_groups"] = [self._config["target_group"]]
-                config_updated = True
-                self.logger.info("已将旧配置项 target_group 转换为 target_groups")
-            # 删除旧配置项
-            del self._config["target_group"]
-            config_updated = True
-            self.logger.info("已清理旧配置项 target_group")
-        
-        # 确保 group_names 配置项存在
-        if "group_names" not in self._config:
-            self._config["group_names"] = {}
-            config_updated = True
-            self.logger.info("添加新配置项: group_names")
         
         # 生成动态帮助信息
         self._config["help_msg"] = self._generate_help_message()
@@ -101,19 +78,24 @@ class ConfigManager:
         
         self._log_config_info()
 
-    def _migrate_hub_config_keys(self) -> bool:
-        """hub_mode -> hub_is_hub；移除已废弃的 hub_mode。"""
+    def _migrate_obsolete_keys(self) -> bool:
+        """移除旧版 NapCat / 本机 Hub 相关配置项。"""
         updated = False
-        if "hub_is_hub" not in self._config:
-            if self._config.get("hub_mode") == "client":
-                self._config["hub_is_hub"] = False
+        obsolete = (
+            "napcat_ws",
+            "access_token",
+            "target_groups",
+            "target_group",
+            "group_names",
+            "hub_is_hub",
+            "hub_mode",
+            "api_qq_enable",
+        )
+        for key in obsolete:
+            if key in self._config:
+                del self._config[key]
                 updated = True
-            elif "hub_mode" in self._config:
-                self._config["hub_is_hub"] = True
-                updated = True
-        if "hub_mode" in self._config:
-            del self._config["hub_mode"]
-            updated = True
+                self.logger.info(f"已清理废弃配置项: {key}")
         return updated
 
     def _init_custom_ban_words(self):
@@ -252,15 +234,21 @@ class ConfigManager:
         ColorFormat = self.color_format
         
         self.logger.info(f"{ColorFormat.AQUA}配置文件已加载{ColorFormat.RESET}")
-        self.logger.info(f"{ColorFormat.GOLD}NapCat WebSocket: {ColorFormat.WHITE}{self._config.get('napcat_ws')}{ColorFormat.RESET}")
-        self.logger.info(f"{ColorFormat.GOLD}目标QQ群: {ColorFormat.WHITE}{self._config.get('target_groups')}{ColorFormat.RESET}")
+        self.logger.info(
+            f"{ColorFormat.GOLD}弧光消息中心: {ColorFormat.WHITE}"
+            f"ws://{self._config.get('hub_host')}:{self._config.get('hub_port')}"
+            f"{ColorFormat.RESET}"
+        )
         self.logger.info(f"{ColorFormat.GOLD}管理员列表: {ColorFormat.WHITE}{self._config.get('admins')}{ColorFormat.RESET}")
         
         sync_card_enabled = self._config.get('sync_group_card', True)
         self.logger.info(f"{ColorFormat.GOLD}强制QQ绑定: {ColorFormat.WHITE}已移除，不再因未绑定限制玩家操作{ColorFormat.RESET}")
         self.logger.info(f"{ColorFormat.GOLD}同步群昵称: {ColorFormat.WHITE}{'启用' if sync_card_enabled else '禁用'}{ColorFormat.RESET}")
-        hub_role = "本机可作为 Hub 并监听端口" if self._config.get("hub_is_hub", True) else "仅作为客户端连接 Hub"
-        self.logger.info(f"{ColorFormat.GOLD}跨服 Hub: {ColorFormat.WHITE}{hub_role}{ColorFormat.RESET}")
+        self.logger.info(
+            f"{ColorFormat.GOLD}跨服广播: {ColorFormat.WHITE}"
+            f"{'启用' if self._config.get('cross_server_broadcast', True) else '禁用'}"
+            f"{ColorFormat.RESET}"
+        )
     
     def get_config(self, key: str, default=None) -> Any:
         """获取配置项"""
@@ -287,29 +275,12 @@ class ConfigManager:
             
             # 检查并合并新的配置项（与_init_config保持一致）
             config_updated = False
-            config_updated |= self._migrate_hub_config_keys()
+            config_updated |= self._migrate_obsolete_keys()
             for key, value in self.default_config.items():
                 if key not in self._config:
                     self._config[key] = value
                     config_updated = True
                     self.logger.info(f"添加新配置项: {key}")
-            
-            # 兼容旧配置格式 - 如果存在target_group单个配置，转换为target_groups数组
-            if "target_group" in self._config:
-                if "target_groups" not in self._config:
-                    self._config["target_groups"] = [self._config["target_group"]]
-                    config_updated = True
-                    self.logger.info("已将旧配置项 target_group 转换为 target_groups")
-                # 删除旧配置项
-                del self._config["target_group"]
-                config_updated = True
-                self.logger.info("已清理旧配置项 target_group")
-            
-            # 确保 group_names 配置项存在
-            if "group_names" not in self._config:
-                self._config["group_names"] = {}
-                config_updated = True
-                self.logger.info("添加新配置项: group_names")
             
             # 重新生成动态帮助信息
             self._config["help_msg"] = self._generate_help_message()

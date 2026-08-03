@@ -14,10 +14,8 @@ from .core import (
     EventHandlers
 )
 from .core.restart_vote_manager import RestartVoteManager
-from .websocket import WebSocketClient
-from .websocket.handlers import set_plugin_instance, send_group_msg_to_all_groups
-from .websocket.hub_server import HubServer
 from .websocket.hub_client import HubClient
+from .websocket.handlers import set_plugin_instance
 from .ui import UIManager
 from .utils.time_utils import TimeUtils
 
@@ -96,7 +94,7 @@ class ArcQQSyncAstrbot(Plugin):
         # UI管理器
         self.ui_manager = UIManager(self)
 
-        # 重启投票（Hub 模式下由 HubServer 持有独立实例；单机回退用此实例）
+        # 重启投票（群指令 /重启 在本机处理）
         self.restart_vote_manager = RestartVoteManager(self.logger)
         
         # 群成员缓存
@@ -108,40 +106,18 @@ class ArcQQSyncAstrbot(Plugin):
         self.logger.info(f"{ColorFormat.AQUA}管理器初始化完成{ColorFormat.RESET}")
 
     def _init_websocket(self):
-        """初始化WebSocket连接 — 根据配置决定启动 Hub 还是客户端"""
-        # 确保没有重复的事件循环
+        """初始化 WebSocket：始终以客户端连接 AstrBot 弧光消息中心。"""
         if hasattr(self, '_loop') and self._loop:
             self.logger.warning("检测到旧的事件循环，正在清理")
             self._loop.call_soon_threadsafe(self._loop.stop)
 
-        # 创建专用事件循环
         self._loop = asyncio.new_event_loop()
-
-        # 在新线程里启动该循环
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
         self._thread.start()
-
-        # hub_is_hub=True：无现有 Hub 时在本机创建 Hub；检测到已有 Hub 则只连接并写入 hub_is_hub=False
-        # hub_is_hub=False：始终只连接，不监听 Hub 端口
-        if self.config_manager.get_config("hub_is_hub", True):
-            self._start_hub_when_free_or_connect()
-        else:
-            self._start_hub_client()
-
-    def _start_hub_server(self):
-        """启动 Hub 服务端模式"""
-        self.data_manager.enable_remote_hub_mode(False)
-        self.logger.info("以 Hub 模式启动...")
-        self._hub_server = HubServer(self, self.logger)
-        self._hub_client = None
-        self.ws_client = None
-        self._current_ws = None
-
-        future = asyncio.run_coroutine_threadsafe(self._hub_server.start(), self._loop)
-        self._task = future
+        self._start_hub_client()
 
     def _capture_legacy_binding_snapshot_if_any(self) -> None:
-        """子服启动前读取本地 data.json，连接 Hub 后合并（避免各服历史数据丢失）。"""
+        """子服启动前读取本地 data.json，连接消息中心后合并。"""
         self._pending_legacy_binding_merge = None
         try:
             path = self.data_manager.binding_file
@@ -153,60 +129,28 @@ class ArcQQSyncAstrbot(Plugin):
                 self._pending_legacy_binding_merge = json.loads(json.dumps(raw))
                 self.logger.info(
                     f"已缓存本地 data.json（{len(self._pending_legacy_binding_merge)} 名玩家），"
-                    "将在连接 Hub 后合并到 Hub"
+                    "将在连接弧光消息中心后合并"
                 )
         except Exception as e:
-            self.logger.warning(f"读取本地 data.json 用于 Hub 合并失败: {e}")
+            self.logger.warning(f"读取本地 data.json 用于中心合并失败: {e}")
 
     def _start_hub_client(self):
-        """启动客户端模式"""
+        """启动客户端，连接 AstrBot 弧光消息中心。"""
         self._capture_legacy_binding_snapshot_if_any()
         self.data_manager.enable_remote_hub_mode(True)
         hub_host = self.config_manager.get_config("hub_host", "127.0.0.1")
-        hub_port = self.config_manager.get_config("hub_port", 19321)
-        self.logger.info(f"以客户端模式启动，连接 Hub ws://{hub_host}:{hub_port}...")
+        hub_port = self.config_manager.get_config("hub_port", 19135)
+        self.logger.info(
+            f"连接弧光消息中心 ws://{hub_host}:{hub_port} ..."
+        )
         self._hub_client = HubClient(self, self.logger)
         self._hub_server = None
-        self.ws_client = None
         self._current_ws = None
 
-        future = asyncio.run_coroutine_threadsafe(self._hub_client.connect_forever(), self._loop)
-        self._task = future
-
-    def _persist_hub_is_client_only(self):
-        """已存在外部 Hub 时持久化为仅连接，便于新服自动加入集群。"""
-        if not self.config_manager.get_config("hub_is_hub", True):
-            return
-        self.config_manager.set_config("hub_is_hub", False)
-        self.config_manager.save_config()
-        self.logger.info(
-            "检测到已有 Hub 在运行，已将配置 hub_is_hub 设为 false（此后本机仅连接，不再尝试创建 Hub）"
+        future = asyncio.run_coroutine_threadsafe(
+            self._hub_client.connect_forever(), self._loop
         )
-
-    def _start_hub_when_free_or_connect(self):
-        """可作为 Hub：端口已被占用则假定已有 Hub，连接并降级配置；否则在本机启动 Hub。"""
-        import socket
-
-        hub_host = self.config_manager.get_config("hub_host", "127.0.0.1")
-        hub_port = self.config_manager.get_config("hub_port", 19321)
-
-        hub_running = False
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(2)
-            result = sock.connect_ex((hub_host, hub_port))
-            sock.close()
-            hub_running = (result == 0)
-        except Exception:
-            hub_running = False
-
-        if hub_running:
-            self.logger.info(f"检测到 Hub 已在 {hub_host}:{hub_port} 监听，以客户端连接并更新配置")
-            self._persist_hub_is_client_only()
-            self._start_hub_client()
-        else:
-            self.logger.info("未检测到现有 Hub，在本机启动 Hub 服务")
-            self._start_hub_server()
+        self._task = future
 
     def _run_loop(self):
         """运行异步事件循环"""
@@ -270,15 +214,12 @@ class ArcQQSyncAstrbot(Plugin):
         return configured if configured else self.server.name
 
     def get_hub_server_catalog_display(self) -> list:
-        """供 QQ 命令展示：Hub 本机用实时表，子服用上次欢迎包中的缓存。"""
-        hub = getattr(self, "_hub_server", None)
-        if hub is not None:
-            return hub.get_server_catalog()
+        """供 QQ 命令展示：使用消息中心欢迎包中的子服目录缓存。"""
         return list(getattr(self, "hub_server_catalog", None) or [])
         
     def api_send_message(self, text: str) -> bool:
         """
-        QQ消息API（简单文本） — 通过 Hub 系统发送
+        QQ消息API（简单文本） — 通过弧光消息中心发送
         保持向后兼容，外部插件可直接传入已格式化的文本。
         注意：此方法不会自动加服务器前缀，调用方需自行处理。
         """
@@ -294,20 +235,14 @@ class ArcQQSyncAstrbot(Plugin):
         :param source_server_id: 可选；来源子服 ID（主机代发时传入，供扩展使用）
         :return: 是否发送成功
         """
-        if not self.config_manager.get_config("api_qq_enable", False):
-            self.logger.warning("QQ消息API功能未启用！")
-            return False
-
         _ = source_server_id  # 预留，供后续扩展
         server_label = (source_server_name or "").strip() or self.server_name
 
-        hub = getattr(self, "_hub_server", None)
         client = getattr(self, "_hub_client", None)
-        target = hub if hub else client
-        if target:
+        if client:
             try:
                 asyncio.run_coroutine_threadsafe(
-                    target.send_game_event(
+                    client.send_game_event(
                         "custom", "", text, source_server_name=server_label
                     ),
                     self._loop,
@@ -342,9 +277,6 @@ class ArcQQSyncAstrbot(Plugin):
         )
         if not formatted:
             return False
-        if not self.config_manager.get_config("api_qq_enable", False):
-            self.logger.warning("QQ消息API功能未启用！")
-            return False
 
         if self._send_structured_game_event(
             event_type, display_name, raw_player_name, message,
@@ -363,13 +295,10 @@ class ArcQQSyncAstrbot(Plugin):
         source_server_name: str = None,
     ) -> bool:
         """
-        通过 Hub / 客户端发送 type=game_event，由 Hub 统一发 QQ 并 _broadcast_to_others 跨服。
-        若当前不是 Hub 模式且无客户端连接，返回 False，由调用方回退到仅发 QQ 文本。
+        通过消息中心客户端发送 type=game_event。
         """
-        hub = getattr(self, "_hub_server", None)
         client = getattr(self, "_hub_client", None)
-        target = hub if hub else client
-        if not target:
+        if not client:
             return False
 
         from .utils.message_utils import strip_minecraft_format_codes
@@ -402,7 +331,7 @@ class ArcQQSyncAstrbot(Plugin):
             if source_server_name:
                 kwargs["source_server_name"] = source_server_name
             asyncio.run_coroutine_threadsafe(
-                target.send_game_event(
+                client.send_game_event(
                     event_type,
                     player=clean_display,
                     message=message,
@@ -495,31 +424,14 @@ class ArcQQSyncAstrbot(Plugin):
             self.logger.debug(f"notify_arc_qq_chat: {e}")
 
     def _send_text_to_qq(self, text: str) -> bool:
-        """内部方法：通过 Hub 系统发送文本到 QQ 群。"""
-        api_qq_enabled = self.config_manager.get_config("api_qq_enable", False)
-        if not api_qq_enabled:
-            self.logger.warning("QQ消息API功能未启用！")
-            return False
-
+        """内部方法：通过弧光消息中心发送文本到 QQ 群。"""
         try:
-            hub = getattr(self, '_hub_server', None)
             client = getattr(self, '_hub_client', None)
-
-            if hub:
-                asyncio.run_coroutine_threadsafe(hub.send_api_message(text), self._loop)
-                return True
-            elif client:
+            if client:
                 asyncio.run_coroutine_threadsafe(client.send_api_message(text), self._loop)
                 return True
-            elif hasattr(self, '_current_ws') and self._current_ws:
-                asyncio.run_coroutine_threadsafe(
-                    send_group_msg_to_all_groups(self._current_ws, text=text),
-                    self._loop
-                )
-                return True
-            else:
-                self.logger.warning("无法发送消息：Hub 和 NapCat WS 均不可用")
-                return False
+            self.logger.warning("无法发送消息：未连接弧光消息中心")
+            return False
         except Exception:
             return False
 
@@ -528,40 +440,20 @@ class ArcQQSyncAstrbot(Plugin):
         try:
             self.logger.info("正在禁用插件...")
 
-            # 发送服务器停止消息（通过 Hub 系统）
             if hasattr(self, '_loop') and self._loop and not self._loop.is_closed() and self._loop.is_running():
                 try:
-                    hub = getattr(self, '_hub_server', None)
                     client = getattr(self, '_hub_client', None)
-                    server_name = self.server_name
-
-                    if hub:
-                        future = asyncio.run_coroutine_threadsafe(
-                            hub.send_game_event("server_stop"),
-                            self._loop
-                        )
-                        future.result(timeout=3)
-                        self.logger.info("服务器停止消息已通过 Hub 发送")
-                    elif client:
+                    if client:
                         future = asyncio.run_coroutine_threadsafe(
                             client.send_game_event("server_stop"),
                             self._loop
                         )
                         future.result(timeout=3)
-                        self.logger.info("服务器停止消息已通过客户端发送")
-                    elif hasattr(self, '_current_ws') and self._current_ws:
-                        # 回退到旧模式
-                        server_end_msg = f"[{server_name}]\n[ARC QQ Sync] 服务器已停止！"
-                        future = asyncio.run_coroutine_threadsafe(
-                            send_group_msg_to_all_groups(self._current_ws, server_end_msg),
-                            self._loop
-                        )
-                        future.result(timeout=3)
-                        self.logger.info("服务器停止消息已直接发送")
+                        self.logger.info("服务器停止消息已通过消息中心发送")
                 except Exception as msg_error:
                     self.logger.warning(f"发送关闭消息失败（这是正常的）: {msg_error}")
 
-            # 保存数据（子服经 Hub 集中存储：关服前把本机在线玩家的计时同步到 Hub）
+            # 保存数据（经消息中心集中存储：关服前把本机在线玩家的计时同步）
             if hasattr(self, 'data_manager'):
                 if getattr(self, '_hub_client', None):
                     try:
@@ -569,33 +461,14 @@ class ArcQQSyncAstrbot(Plugin):
                             self.data_manager.stop_player_timer(p.name)
                             self.data_manager.update_player_quit(p.name)
                     except Exception as e:
-                        self.logger.warning(f"向 Hub 同步在线时长与离场时间失败: {e}")
+                        self.logger.warning(f"向消息中心同步在线时长与离场时间失败: {e}")
                 else:
                     self.data_manager.cleanup_timer_system()
                 self.data_manager.save_data()
 
-            # 停止 Hub 服务端（先转移角色）
-            if hasattr(self, '_hub_server') and self._hub_server:
-                if hasattr(self, '_loop') and self._loop and not self._loop.is_closed() and self._loop.is_running():
-                    try:
-                        future = asyncio.run_coroutine_threadsafe(
-                            self._hub_server.transfer_and_stop(), self._loop)
-                        future.result(timeout=5)
-                    except Exception as e:
-                        self.logger.warning(f"Hub 转移超时，直接停止: {e}")
-                        self._hub_server.stop()
-                else:
-                    self._hub_server.stop()
-
-            # 停止 Hub 客户端
             if hasattr(self, '_hub_client') and self._hub_client:
                 self._hub_client.stop()
 
-            # 停止旧模式 WebSocket 连接
-            if hasattr(self, 'ws_client') and self.ws_client:
-                self.ws_client.stop()
-
-            # 停止事件循环
             if hasattr(self, '_loop') and self._loop:
                 try:
                     if not self._loop.is_closed():
@@ -608,7 +481,6 @@ class ArcQQSyncAstrbot(Plugin):
                 except Exception as loop_error:
                     self.logger.warning(f"停止事件循环时出错: {loop_error}")
 
-                # 等待线程结束
                 if hasattr(self, '_thread') and self._thread and self._thread.is_alive():
                     try:
                         self._thread.join(timeout=5)

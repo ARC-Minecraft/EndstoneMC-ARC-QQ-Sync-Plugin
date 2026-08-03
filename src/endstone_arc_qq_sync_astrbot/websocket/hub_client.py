@@ -1,6 +1,6 @@
 """
-Hub 中转平台客户端
-非 Hub 的 MC 服务器插件通过此模块连接到 Hub，发送游戏事件并接收 QQ 消息和跨服事件。
+弧光消息中心客户端
+MC 服务器插件通过此模块连接到 AstrBot 弧光消息中心，发送游戏事件并接收 QQ 消息和跨服事件。
 """
 
 import asyncio
@@ -21,7 +21,7 @@ class HubClient:
 
         # Hub 连接信息
         self.hub_host = plugin.config_manager.get_config("hub_host", "127.0.0.1")
-        self.hub_port = plugin.config_manager.get_config("hub_port", 19321)
+        self.hub_port = plugin.config_manager.get_config("hub_port", 19135)
         self.token = plugin.config_manager.get_config("hub_token", "")
         self.server_name = plugin.server_name
 
@@ -67,7 +67,7 @@ class HubClient:
             return
 
         self._running = True
-        self.logger.info(f"正在连接 Hub ws://{self.hub_host}:{self.hub_port} ...")
+        self.logger.info(f"正在连接弧光消息中心 ws://{self.hub_host}:{self.hub_port} ...")
 
         delay = 1
         consecutive_failures = 0
@@ -198,11 +198,10 @@ class HubClient:
                     )
 
         elif msg_type == "hub_transfer":
-            # Hub 角色转移请求
-            reason = data.get("reason", "unknown")
-            self.logger.info(f"收到 Hub 角色转移请求 (原因: {reason})")
-            await self._handle_hub_transfer(data)
-            return  # 处理完转移后不再继续消息循环
+            # 旧版本机 Hub 角色转移已废弃；消息中心固定在 AstrBot。
+            self.logger.warning(
+                "收到已废弃的 hub_transfer 消息，已忽略（请使用 AstrBot 弧光消息中心）"
+            )
 
         elif msg_type == "command_forward":
             # Hub 转发的 QQ 群命令，在本机执行并回复
@@ -363,55 +362,6 @@ class HubClient:
                 self.logger.error(f"发送跨服消息失败: {e}")
 
         self.plugin.server.scheduler.run_task(self.plugin, send, delay=1)
-
-    async def _handle_hub_transfer(self, data: dict):
-        """处理 Hub 角色转移请求：从客户端切换为 Hub 服务端"""
-        from .hub_server import HubServer
-
-        self.logger.info("正在从客户端切换为 Hub 服务端...")
-
-        # 应用 Hub 传来的配置（确保新 Hub 使用正确的 NapCat 设置）
-        napcat_ws = data.get("napcat_ws")
-        access_token = data.get("access_token")
-        target_groups = data.get("target_groups")
-        group_names = data.get("group_names")
-
-        if napcat_ws:
-            self.plugin.config_manager.set_config("napcat_ws", napcat_ws)
-        if access_token:
-            self.plugin.config_manager.set_config("access_token", access_token)
-        if target_groups is not None:
-            self.plugin.config_manager.set_config("target_groups", target_groups)
-        if group_names is not None:
-            self.plugin.config_manager.set_config("group_names", group_names)
-
-        # 持久化配置，确保新 Hub 重启后仍使用正确的设置
-        try:
-            self.plugin.config_manager.save_config()
-        except Exception as e:
-            self.logger.warning(f"保存转移配置失败: {e}")
-
-        # 停止客户端连接
-        self._running = False
-        if self.ws:
-            try:
-                await self.ws.close()
-            except Exception:
-                pass
-            self.ws = None
-
-        # 在插件中切换模式
-        self.plugin._hub_client = None
-        self.plugin._hub_server = HubServer(self.plugin, self.logger)
-        self.plugin.data_manager.enable_remote_hub_mode(False)
-
-        # 启动新 Hub（已经在同一事件循环中，使用 ensure_future）
-        try:
-            future = asyncio.ensure_future(self.plugin._hub_server.start())
-            self.plugin._task = future
-            self.logger.info("✅ 已成功切换为 Hub 服务端模式")
-        except Exception as e:
-            self.logger.error(f"切换为 Hub 服务端失败: {e}")
 
     async def _handle_restart_vote_online_list(self, data: dict) -> None:
         """响应 Hub 查询本机在线玩家（用于重启投票）。"""

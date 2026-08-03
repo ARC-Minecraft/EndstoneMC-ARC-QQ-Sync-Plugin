@@ -681,11 +681,8 @@ async def _handle_group_command(
                     except:
                         reply = "ℹ️ 服务器信息获取失败"
         
-        # /重启 — 由 Hub 集中处理；非 Hub 单机时在本机处理
+        # /重启 — 在本机处理重启投票
         elif cmd == "重启":
-            hub = getattr(_plugin_instance, "_hub_server", None)
-            if hub is not None:
-                return
             reply = await _handle_restart_vote_local(ws, user_id, group_id)
 
         # /绑定 <玩家名> — 在群内将当前QQ绑定到指定游戏角色（需服务器记录中存在该角色）

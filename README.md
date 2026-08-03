@@ -1,6 +1,6 @@
 # ARC QQ Sync (AstrBot Version)
 
-Endstone 服务器端 QQ 互通插件，通过 **弧光消息中心** 与 AstrBot 对接，实现群服消息与指令联动。
+Endstone 服务器端 QQ 互通插件，通过 **AstrBot 弧光消息中心** 实现跨设备群服消息与指令联动。
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.11+-green.svg)
@@ -11,15 +11,15 @@ Endstone 服务器端 QQ 互通插件，通过 **弧光消息中心** 与 AstrBo
 ## 架构说明
 
 ```
-AstrBot  ←→  弧光消息中心（EndStone 插件，开启中心服务）
-                    ↑
-                    │  WebSocket
-                    ↓
-           本插件（各 MC 子服）
+QQ / 其他平台
+      ↕  AstrBot 平台适配器
+AstrBot 插件「弧光消息中心」（WebSocket :19321）
+      ↕  Hub JSON 协议
+本插件（各 MC 子服，仅客户端）
 ```
 
-- **AstrBot**：QQ 侧机器人框架
-- **弧光消息中心**：独立 EndStone 插件，负责开启中心服务器，统一对接 AstrBot
+- **AstrBot**：QQ 侧机器人框架，安装并启用「弧光消息中心」插件
+- **弧光消息中心**：在 AstrBot 上开启中心服务，统一对接 QQ，并向各 MC 子服转发
 - **本插件**：安装在各 Minecraft 服务器上，连接弧光消息中心，上报游戏事件并响应群指令
 
 消息转发策略由 **ARCCore（弧光核心）** 负责管理；本插件侧重子服侧连接、指令执行与临时统计。
@@ -27,19 +27,19 @@ AstrBot  ←→  弧光消息中心（EndStone 插件，开启中心服务）
 ## 当前功能
 
 1. **消息转发**  
-   游戏事件 / 聊天等上报至消息中心；QQ ↔ 游戏的转发策略由 ARCCore 管理。
+   游戏事件 / 聊天等上报至消息中心；QQ ↔ 游戏由中心双向转发。
 
 2. **指令响应**  
    支持群内远程指令，例如 `/cmd`、`/list`、`/tps`、`/info` 等。
 
 3. **玩家统计（过渡）**  
-   在线时长、游玩次数等由本插件暂时负责；后续将迁移至弧光核心。
+   在线时长、游玩次数等由消息中心集中存储；本插件经 data_rpc 读写。
 
 ## 前置要求
 
 - Endstone `0.11+`（Python `3.11+`）
-- 已部署并可连接的 **弧光消息中心**
-- AstrBot 侧已与消息中心完成对接
+- 已部署并可连接的 **AstrBot 弧光消息中心**（插件目录：`astrbot_plugin_endstone_arc`）
+- AstrBot 已接入 QQ（如 aiocqhttp / NapCat）
 
 ## 安装
 
@@ -64,9 +64,8 @@ AstrBot  ←→  弧光消息中心（EndStone 插件，开启中心服务）
 ```json
 {
   "server_name": "生存服",
-  "hub_is_hub": false,
   "hub_host": "127.0.0.1",
-  "hub_port": 19321,
+  "hub_port": 19135,
   "hub_token": "",
   "cross_server_broadcast": true
 }
@@ -75,12 +74,14 @@ AstrBot  ←→  弧光消息中心（EndStone 插件，开启中心服务）
 | 配置项 | 说明 |
 |--------|------|
 | `server_name` | 本子服显示名称 |
-| `hub_is_hub` | 子服场景请设为 `false`，连接外部弧光消息中心 |
-| `hub_host` / `hub_port` | 消息中心地址与端口 |
-| `hub_token` | 连接令牌（与消息中心一致） |
-| `cross_server_broadcast` | 是否参与跨服广播 |
+| `hub_host` / `hub_port` | AstrBot 弧光消息中心地址与端口（本机默认 `127.0.0.1:19135`；跨设备经 FRP 用公网 IP） |
+| `hub_token` | 连接令牌（与中心 `auth_token` 一致） |
+| `cross_server_broadcast` | 是否参与跨服广播（由中心扇出） |
+| `admins` | 群指令管理员 QQ 号 |
 
-> 说明：旧版直接对接 NapCat 的配置项仍可能出现在配置文件中；重构完成后，连接入口将统一为弧光消息中心。
+`api_send_message` / `api_send_event` / `api_send_raw` 始终可用，供 ARCCore 等插件调用，无需额外开关。
+
+AstrBot 弧光消息中心侧需配置：`ws_port=19135`、`target_groups`、`platform_id`。
 
 ## 常用群指令
 
@@ -90,6 +91,7 @@ AstrBot  ←→  弧光消息中心（EndStone 插件，开启中心服务）
 | `/list` | 在线玩家 | 全员 |
 | `/tps` | TPS / MSPT | 全员 |
 | `/info` | 服务器信息 | 全员 |
+| `/servers` | 查看已连接子服（由消息中心回复） | 全员 |
 | `/cmd [子服编号] <命令>` | 执行控制台命令 | 管理员 |
 | `/who <玩家名\|QQ号>` | 查询玩家信息（含统计） | 管理员 |
 
@@ -104,7 +106,7 @@ AstrBot  ←→  弧光消息中心（EndStone 插件，开启中心服务）
 ## 路线图
 
 - [x] 子服连接中心、指令响应、基础统计
-- [ ] 全面切换为 AstrBot + 弧光消息中心对接
+- [x] 全面切换为 AstrBot + 弧光消息中心对接
 - [ ] 消息转发策略完全交由 ARCCore
 - [ ] 玩家统计迁移至弧光核心
 

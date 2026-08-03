@@ -119,17 +119,7 @@ class EventHandlers:
             existing_player = self.plugin.data_manager.get_player_by_xuid(player_xuid)
             if existing_player and existing_player.get("name") != player_name:
                 old_name = existing_player.get("name")
-                if self.plugin.data_manager.update_player_name(old_name, player_name, player_xuid):
-                    if (hasattr(self.plugin, '_current_ws') and self.plugin._current_ws and
-                        self.plugin.config_manager.get_config("sync_group_card", True)):
-                        qq_number = existing_player.get("qq")
-                        if qq_number:
-                            import asyncio
-                            from ..websocket.handlers import set_group_card_in_all_groups
-                            asyncio.run_coroutine_threadsafe(
-                                set_group_card_in_all_groups(self.plugin._current_ws, user_id=int(qq_number), card=player_name),
-                                self.plugin._loop
-                            )
+                self.plugin.data_manager.update_player_name(old_name, player_name, player_xuid)
 
         except Exception as e:
             self.logger.error(f"处理玩家加入事件失败: {e}")
