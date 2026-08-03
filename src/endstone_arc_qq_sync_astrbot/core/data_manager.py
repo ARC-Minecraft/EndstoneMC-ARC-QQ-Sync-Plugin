@@ -23,8 +23,6 @@ class DataManager:
         self._binding_data: Dict[str, Any] = {}
         self._auto_save_enabled = True
         
-        # 进服时间记录（玩家名 -> 进服时间戳），用于在离开时计算在线时长
-                
         self._init_binding_data()
     
     def _init_binding_data(self):
@@ -58,8 +56,7 @@ class DataManager:
         self._remote_data_mode = enabled
         if enabled:
             self._binding_data = {}
-            self._online_timer_start_times.clear()
-            self.logger.info("已启用 Hub 集中数据：绑定与累计时长由 Hub 进程维护")
+            self.logger.info("已启用 Hub 集中数据：绑定由 AstrBot 中心维护，时长由 ARCCore 维护")
         else:
             try:
                 if self.binding_file.exists():
