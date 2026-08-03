@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "endstone-qqsync-plugin"
-version = "0.1.3"
-description = "Endstone QQsync群服互通插件 - 支持双向消息同步、服务器信息查询、管理命令执行"
+name = "endstone-arc-qq-sync-astrbot"
+version = "1.0.0"
+description = "ARC QQ Sync (AstrBot Version) - Endstone 子服插件，连接弧光消息中心实现群服互通"
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [
@@ -16,7 +16,7 @@ authors = [
 Homepage = "https://github.com/ARC-Minecraft/EndstoneMC-ARC-QQ-Sync-Plugin"
 
 [project.entry-points."endstone"]
-qqsync-plugin = "endstone_qqsync_plugin.qqsync_plugin:qqsync"
+arc-qq-sync-astrbot = "endstone_arc_qq_sync_astrbot.plugin:ArcQQSyncAstrbot"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/endstone_qqsync_plugin"]
+packages = ["src/endstone_arc_qq_sync_astrbot"]

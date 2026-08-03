@@ -17,11 +17,11 @@
 
 ## 2. 目录结构说明
 
-源码位于 `src/endstone_qqsync_plugin`，主要结构如下：
+源码位于 `src/endstone_arc_qq_sync_astrbot`，主要结构如下：
 
 | 目录/文件 | 说明 |
 | :--- | :--- |
-| `qqsync_plugin.py` | **插件入口**。继承自 `endstone.plugin.Plugin`，负责生命周期管理、管理器初始化及全局调度。 |
+| `plugin.py` | **插件入口**。继承自 `endstone.plugin.Plugin`，负责生命周期管理、管理器初始化及全局调度。 |
 | `core/` | **核心逻辑模块**。 |
 | ├── `config_manager.py` | 配置管理，处理 `config.json` 和 `custom_ban_words.txt` 的读写与热重载。 |
 | ├── `data_manager.py` | 数据持久化，管理玩家绑定数据、统计信息等。 |
@@ -39,7 +39,7 @@
 
 ## 3. 核心模块详解
 
-### 3.1 主插件类 (`qqsync_plugin.py`)
+### 3.1 主插件类 (`plugin.py` / `ArcQQSyncAstrbot`)
 - **生命周期**:
     - `on_load`: 初始化时间系统。
     - `on_enable`: 初始化所有管理器 (`_init_managers`)，启动 WebSocket 独立线程 (`_init_websocket`)，注册事件监听，启动定时任务（清理、成员检查）。
@@ -87,12 +87,11 @@
     - 插件环境: Python 3.11+
     - 外部服务: OneBot V11 实现（如 NapCat, Lagrange）
 - **安装**:放置 `.whl` 文件到 `plugins` 目录。
-- **Docker**: 项目提供了 `Dockerfile` 和 `docker-compose.yml`，支持容器化部署 Endstone + 插件环境。
 
 ## 6. OneBot V11 API 使用情况
 
 ### 6.1 已实现的 API
-插件当前使用了以下 OneBot V11 标准 API (参考 `src/endstone_qqsync_plugin/websocket/handlers.py`)：
+插件当前使用了以下 OneBot V11 标准 API (参考 `src/endstone_arc_qq_sync_astrbot/websocket/handlers.py`)：
 
 | API 名称 | 用途 | 调用场景 |
 | :--- | :--- | :--- |
@@ -120,7 +119,7 @@
 ## 7. Endstone API 使用情况
 
 ### 7.1 已实现的 API
-插件深度集成了 Endstone API，主要涉及以下几个模块 (参考 `src/endstone_qqsync_plugin/` 下的源码)：
+插件深度集成了 Endstone API，主要涉及以下几个模块 (参考 `src/endstone_arc_qq_sync_astrbot/` 下的源码)：
 
 | 模块 | API 名称 | 用途 |
 | :--- | :--- | :--- |
