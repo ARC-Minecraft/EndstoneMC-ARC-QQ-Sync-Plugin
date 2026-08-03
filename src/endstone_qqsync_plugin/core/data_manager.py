@@ -3,26 +3,28 @@
 负责QQ绑定数据的存储、查询和管理
 """
 
+import asyncio
 import json
-import time
 from pathlib import Path
-from typing import Dict, List, Any
+from typing import Any, Dict, List, Optional
+
 from ..utils.time_utils import TimeUtils
 
 
 class DataManager:
     """数据管理器"""
     
-    def __init__(self, data_folder: Path, logger):
+    def __init__(self, data_folder: Path, logger, plugin=None):
         self.data_folder = data_folder
         self.logger = logger
+        self._plugin = plugin
+        self._remote_data_mode = False
         self.binding_file = data_folder / "data.json"
         self._binding_data: Dict[str, Any] = {}
         self._auto_save_enabled = True
         
-        # 新的计时器系统变量
-        self._online_timer_start_times: Dict[str, int] = {}  # 玩家在线计时开始时间
-        self._last_timer_update: int = 0  # 上次计时器更新时间
+        # 进服时间记录（玩家名 -> 进服时间戳），用于在离开时计算在线时长
+        self._online_timer_start_times: Dict[str, int] = {}
         
         self._init_binding_data()
     
@@ -49,13 +51,225 @@ class DataManager:
         from endstone import ColorFormat
         self.logger.info(f"{ColorFormat.AQUA}QQ绑定数据已加载，已绑定玩家: {len(self._binding_data)}{ColorFormat.RESET}")
     
+    def enable_remote_hub_mode(self, enabled: bool):
+        """
+        Hub 客户端为 True：运行时绑定与统计一律走 Hub RPC，不读写本地 data.json。
+        Hub 服务端为 False：从本地 data.json 加载并作为唯一权威数据源。
+        """
+        self._remote_data_mode = enabled
+        if enabled:
+            self._binding_data = {}
+            self._online_timer_start_times.clear()
+            self.logger.info("已启用 Hub 集中数据：绑定与累计时长由 Hub 进程维护")
+        else:
+            try:
+                if self.binding_file.exists():
+                    with open(self.binding_file, "r", encoding="utf-8") as f:
+                        self._binding_data = json.load(f)
+                else:
+                    self.binding_file.parent.mkdir(parents=True, exist_ok=True)
+                    self._binding_data = {}
+                    with open(self.binding_file, "w", encoding="utf-8") as f:
+                        json.dump({}, f, indent=2, ensure_ascii=False)
+                self._update_data_structure()
+            except Exception as e:
+                self.logger.error(f"从本地 data.json 加载失败: {e}")
+                self._binding_data = {}
+            from endstone import ColorFormat
+            self.logger.info(
+                f"{ColorFormat.AQUA}本地 data.json 已作为权威数据，记录数: {len(self._binding_data)}{ColorFormat.RESET}"
+            )
+
+    def _use_remote(self) -> bool:
+        return self._remote_data_mode
+
+    def _rpc(self, action: str, args: Optional[Dict[str, Any]] = None) -> Any:
+        if not self._plugin:
+            raise RuntimeError("DataManager 未关联插件，无法访问 Hub")
+        client = getattr(self._plugin, "_hub_client", None)
+        loop = getattr(self._plugin, "_loop", None)
+        if not client or not loop:
+            raise RuntimeError("Hub 客户端未就绪")
+        fut = asyncio.run_coroutine_threadsafe(client.data_rpc(action, args or {}), loop)
+        return fut.result(timeout=125)
+
+    def _rpc_safe(self, action: str, args: Optional[Dict[str, Any]], default: Any):
+        try:
+            return self._rpc(action, args)
+        except Exception as e:
+            self.logger.warning(f"Hub 数据 RPC ({action}) 失败: {e}")
+            return default
+
+    def clear_local_binding_file_only(self) -> None:
+        """子服将历史 data.json 合并到 Hub 成功后，清空本地文件（不经过 RPC）。"""
+        try:
+            self.binding_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.binding_file, "w", encoding="utf-8") as f:
+                json.dump({}, f, indent=2, ensure_ascii=False)
+            self.logger.info("本地 data.json 已清空（历史记录已并入 Hub）")
+        except Exception as e:
+            self.logger.warning(f"清空本地 data.json 失败: {e}")
+
+    @staticmethod
+    def _max_optional_ts(a, b):
+        pool = [x for x in (a, b) if x is not None]
+        return max(pool) if pool else None
+
+    @staticmethod
+    def _min_optional_ts(a, b):
+        pool = [x for x in (a, b) if x is not None]
+        return min(pool) if pool else None
+
+    def merge_legacy_binding_snapshot(
+        self, snapshot: Dict[str, Any], source_server: str = ""
+    ) -> Dict[str, int]:
+        """
+        将子服导出的 data.json 合并进当前库（仅 Hub 进程调用）。
+        已存在同名玩家：累计时长与进服次数相加，时间戳取较新/绑定时间取较早等；不存在则整段导入。
+        """
+        if self._use_remote():
+            raise RuntimeError("merge_legacy_binding_snapshot 仅在 Hub 端执行")
+        if not isinstance(snapshot, dict):
+            return {"created": 0, "merged": 0, "skipped": 0}
+
+        src = f"[{source_server}] " if source_server else ""
+        stats = {"created": 0, "merged": 0, "skipped": 0}
+        required_fields = {
+            "total_playtime": 0,
+            "last_join_time": None,
+            "last_quit_time": None,
+            "session_count": 0,
+        }
+
+        for key, inc in snapshot.items():
+            if not isinstance(inc, dict):
+                stats["skipped"] += 1
+                continue
+            name = str(key)
+            for field, default_value in required_fields.items():
+                if field not in inc:
+                    inc[field] = default_value
+
+            if name not in self._binding_data:
+                new_rec = json.loads(json.dumps(inc))
+                new_rec["name"] = name
+                self._binding_data[name] = new_rec
+                stats["created"] += 1
+            else:
+                self._merge_legacy_into_existing(self._binding_data[name], inc, name)
+                stats["merged"] += 1
+
+        self.save_data()
+        self.logger.info(
+            f"{src}子服历史 data.json 已合并至 Hub: 新建 {stats['created']} 条, "
+            f"合并 {stats['merged']} 条, 跳过 {stats['skipped']} 条"
+        )
+        return stats
+
+    def merge_legacy_binding_one(
+        self, player_name: str, player_data: dict, source_server: str = ""
+    ) -> str:
+        """
+        合并单名玩家（仅 Hub）。不写盘，请随后调用 merge_legacy_binding_persist。
+        返回 created | merged | skipped
+        """
+        if self._use_remote():
+            raise RuntimeError("merge_legacy_binding_one 仅在 Hub 端执行")
+        if not isinstance(player_data, dict):
+            return "skipped"
+        required_fields = {
+            "total_playtime": 0,
+            "last_join_time": None,
+            "last_quit_time": None,
+            "session_count": 0,
+        }
+        inc = json.loads(json.dumps(player_data))
+        name = str(player_name)
+        for field, default_value in required_fields.items():
+            if field not in inc:
+                inc[field] = default_value
+
+        if name not in self._binding_data:
+            new_rec = json.loads(json.dumps(inc))
+            new_rec["name"] = name
+            self._binding_data[name] = new_rec
+            if source_server:
+                self.logger.debug(f"[{source_server}] 历史合并 新建: {name}")
+            return "created"
+        self._merge_legacy_into_existing(self._binding_data[name], inc, name)
+        if source_server:
+            self.logger.debug(f"[{source_server}] 历史合并 并入: {name}")
+        return "merged"
+
+    def merge_legacy_binding_persist(self) -> None:
+        """在逐条 merge_legacy_binding_one 之后落盘（仅 Hub）。"""
+        if self._use_remote():
+            raise RuntimeError("merge_legacy_binding_persist 仅在 Hub 端执行")
+        self.save_data()
+
+    def _merge_legacy_into_existing(self, hub: dict, inc: dict, name: str) -> None:
+        hub["total_playtime"] = int(hub.get("total_playtime") or 0) + int(inc.get("total_playtime") or 0)
+        hub["session_count"] = int(hub.get("session_count") or 0) + int(inc.get("session_count") or 0)
+
+        hub["last_join_time"] = self._max_optional_ts(
+            hub.get("last_join_time"), inc.get("last_join_time")
+        )
+        hub["last_quit_time"] = self._max_optional_ts(
+            hub.get("last_quit_time"), inc.get("last_quit_time")
+        )
+
+        def nz(v) -> bool:
+            return bool(v and str(v).strip())
+
+        if not nz(hub.get("qq")) and nz(inc.get("qq")):
+            hub["qq"] = inc.get("qq", "")
+        if not nz(hub.get("xuid")) and nz(inc.get("xuid")):
+            hub["xuid"] = inc.get("xuid", "")
+        elif nz(hub.get("xuid")) and nz(inc.get("xuid")) and str(hub["xuid"]) != str(inc["xuid"]):
+            self.logger.warning(
+                f"合并玩家 [{name}] 时 XUID 与子服不一致，保留 Hub 侧 XUID"
+            )
+
+        early_bind = self._min_optional_ts(hub.get("bind_time"), inc.get("bind_time"))
+        if early_bind is not None:
+            hub["bind_time"] = early_bind
+
+        hub["rebind_time"] = self._max_optional_ts(hub.get("rebind_time"), inc.get("rebind_time"))
+
+        if not nz(hub.get("qq")):
+            for fld in ("unbind_time", "unbind_by", "original_qq", "unbind_reason"):
+                if not hub.get(fld) and inc.get(fld):
+                    hub[fld] = inc[fld]
+
+        hb = bool(hub.get("is_banned", False))
+        ib = bool(inc.get("is_banned", False))
+        if ib and not hb:
+            hub["is_banned"] = True
+            for fld in ("ban_time", "ban_by", "ban_reason"):
+                if inc.get(fld) is not None:
+                    hub[fld] = inc[fld]
+        elif hb and ib:
+            hub["is_banned"] = True
+            hub["ban_time"] = (
+                self._min_optional_ts(hub.get("ban_time"), inc.get("ban_time"))
+                or hub.get("ban_time")
+                or inc.get("ban_time")
+            )
+        elif hb:
+            hub["is_banned"] = True
+
+        hub_unban = hub.get("unban_time")
+        inc_unban = inc.get("unban_time")
+        hub["unban_time"] = self._max_optional_ts(hub_unban, inc_unban)
+        if inc.get("unban_by") and not hub.get("unban_by"):
+            hub["unban_by"] = inc["unban_by"]
+
     def _update_data_structure(self):
-        """更新数据结构以保持兼容性"""
+        """更新数据结构以保持兼容性（不再删除任何玩家记录）"""
         data_updated = False
-        invalid_bindings = []
         
         for player_name, data in self._binding_data.items():
-            # 添加缺失的字段
+            # 添加缺失的字段，仅做补全，不做删除
             required_fields = {
                 "total_playtime": 0,
                 "last_join_time": None,
@@ -67,33 +281,15 @@ class DataManager:
                 if field not in data:
                     data[field] = default_value
                     data_updated = True
-            
-            # 检查并清理无效的QQ绑定
-            qq_number = data.get("qq", "")
-            bind_time = data.get("bind_time", 0)
-            
-            # 只清理那些QQ为空且没有绑定时间的记录
-            if (not qq_number or not qq_number.strip()) and not bind_time:
-                invalid_bindings.append(player_name)
-                self.logger.warning(f"发现无效绑定：玩家 {player_name} 的QQ号为空且无绑定历史，将被清理")
-        
-        # 清理无效绑定
-        for player_name in invalid_bindings:
-            del self._binding_data[player_name]
-            data_updated = True
-        
-        if invalid_bindings:
-            self.logger.info(f"已清理 {len(invalid_bindings)} 个无效的QQ绑定")
         
         if data_updated:
             self.save_data()
-            if invalid_bindings:
-                self.logger.info("已更新绑定数据结构并清理无效绑定")
-            else:
-                self.logger.info("已更新绑定数据结构以支持在线时间统计")
+            self.logger.info("已更新绑定数据结构以支持在线时间统计（未删除任何玩家记录）")
     
     def save_data(self):
         """保存QQ绑定数据到文件"""
+        if self._use_remote():
+            return
         try:
             # 创建临时文件，避免写入过程中的数据损坏
             temp_file = self.binding_file.with_suffix('.tmp')
@@ -116,6 +312,8 @@ class DataManager:
     
     def trigger_save(self, reason: str = "数据变更"):
         """触发数据保存"""
+        if self._use_remote():
+            return
         if self._auto_save_enabled:
             self.save_data()
             self.logger.info(f"数据保存: {reason}")
@@ -123,6 +321,14 @@ class DataManager:
     # 玩家绑定相关方法
     def is_player_bound(self, player_name: str, player_xuid: str = None) -> bool:
         """检查玩家是否已绑定QQ"""
+        if self._use_remote():
+            return bool(
+                self._rpc_safe(
+                    "is_player_bound",
+                    {"player_name": player_name, "player_xuid": player_xuid},
+                    False,
+                )
+            )
         # 如果提供了XUID，优先通过XUID查找
         if player_xuid:
             player_data = self._get_player_by_xuid(player_xuid)
@@ -152,10 +358,16 @@ class DataManager:
     
     def get_player_qq(self, player_name: str) -> str:
         """获取玩家绑定的QQ号"""
+        if self._use_remote():
+            r = self._rpc_safe("get_player_qq", {"player_name": player_name}, "")
+            return r if isinstance(r, str) else ""
         return self._binding_data.get(player_name, {}).get("qq", "")
     
     def get_qq_player(self, qq_number: str) -> str:
         """根据QQ号获取绑定的玩家名"""
+        if self._use_remote():
+            r = self._rpc_safe("get_qq_player", {"qq_number": qq_number}, "")
+            return r if isinstance(r, str) else ""
         for name, data in self._binding_data.items():
             current_qq = data.get("qq", "")
             if current_qq and current_qq.strip() == qq_number:
@@ -164,6 +376,9 @@ class DataManager:
     
     def get_qq_player_history(self, qq_number: str) -> str:
         """根据QQ号获取历史绑定的玩家名（包括已解绑的）"""
+        if self._use_remote():
+            r = self._rpc_safe("get_qq_player_history", {"qq_number": qq_number}, "")
+            return r if isinstance(r, str) else ""
         for name, data in self._binding_data.items():
             # 首先检查当前绑定的QQ号
             if data.get("qq") == qq_number:
@@ -175,6 +390,9 @@ class DataManager:
     
     def get_player_by_xuid(self, xuid: str) -> Dict[str, Any]:
         """根据XUID获取玩家绑定信息"""
+        if self._use_remote():
+            r = self._rpc_safe("get_player_by_xuid", {"xuid": xuid}, {})
+            return r if isinstance(r, dict) else {}
         return self._get_player_by_xuid(xuid)
     
     def bind_player_qq(self, player_name: str, player_xuid: str, qq_number: str) -> bool:
@@ -192,6 +410,22 @@ class DataManager:
         if not player_name or not player_name.strip():
             self.logger.error(f"尝试绑定QQ {qq_clean} 给空玩家名，操作被拒绝")
             return False
+
+        if self._use_remote():
+            try:
+                return bool(
+                    self._rpc(
+                        "bind_player_qq",
+                        {
+                            "player_name": player_name.strip(),
+                            "player_xuid": player_xuid,
+                            "qq_number": qq_clean,
+                        },
+                    )
+                )
+            except Exception as e:
+                self.logger.error(f"Hub 绑定 QQ 失败: {e}")
+                return False
         
         # 检查是否已有该玩家的数据
         if player_name in self._binding_data:
@@ -235,6 +469,17 @@ class DataManager:
     
     def unbind_player_qq(self, player_name: str, admin_name: str = "system") -> bool:
         """解绑玩家QQ（保留游戏数据）"""
+        if self._use_remote():
+            try:
+                return bool(
+                    self._rpc(
+                        "unbind_player_qq",
+                        {"player_name": player_name, "admin_name": admin_name},
+                    )
+                )
+            except Exception as e:
+                self.logger.error(f"Hub 解绑失败: {e}")
+                return False
         if player_name not in self._binding_data:
             return False
         
@@ -256,6 +501,17 @@ class DataManager:
     
     def update_player_name(self, old_name: str, new_name: str, xuid: str) -> bool:
         """更新玩家名称（处理改名情况）"""
+        if self._use_remote():
+            try:
+                return bool(
+                    self._rpc(
+                        "update_player_name",
+                        {"old_name": old_name, "new_name": new_name, "xuid": xuid},
+                    )
+                )
+            except Exception as e:
+                self.logger.error(f"Hub 同步改名失败: {e}")
+                return False
         if old_name in self._binding_data:
             # 保存原有数据
             player_data = self._binding_data[old_name].copy()
@@ -275,6 +531,13 @@ class DataManager:
     # 游戏统计相关方法
     def update_player_join(self, player_name: str, player_xuid: str = None):
         """更新玩家加入时间和进服次数（为所有玩家记录，不检查QQ绑定）"""
+        if self._use_remote():
+            self._rpc_safe(
+                "update_player_join",
+                {"player_name": player_name, "player_xuid": player_xuid},
+                None,
+            )
+            return
         current_time = int(TimeUtils.get_timestamp())
         
         # 确保玩家数据存在，如果不存在则创建
@@ -300,19 +563,25 @@ class DataManager:
         self.trigger_save(f"玩家加入: {player_name}")
     
     def update_player_quit(self, player_name: str):
-        """更新玩家离开时间（为所有玩家记录，不检查QQ绑定，不处理在线时长累计）"""
+        """更新玩家离开时间（在线时长已在 stop_player_timer 中根据进服时间计算并累加）"""
+        if self._use_remote():
+            self._rpc_safe("update_player_quit", {"player_name": player_name}, None)
+            return
         if player_name not in self._binding_data:
             return
-        
         current_time = int(TimeUtils.get_timestamp())
         self._binding_data[player_name]["last_quit_time"] = current_time
-        
-        # 注意：在线时长累计现在由计时器系统处理，这里只记录退出时间
-        
         self.trigger_save(f"玩家离开: {player_name}")
     
     def get_player_playtime_info(self, player_name: str, online_players: List[Any]) -> Dict[str, Any]:
         """使用计时器系统获取玩家在线时间信息"""
+        if self._use_remote():
+            r = self._rpc_safe(
+                "get_player_playtime_info",
+                {"player_name": player_name},
+                {},
+            )
+            return r if isinstance(r, dict) else {}
         if player_name not in self._binding_data:
             return {}
         
@@ -344,12 +613,31 @@ class DataManager:
     # 封禁相关方法
     def is_player_banned(self, player_name: str) -> bool:
         """检查玩家是否被封禁"""
+        if self._use_remote():
+            return bool(
+                self._rpc_safe("is_player_banned", {"player_name": player_name}, False)
+            )
         if player_name not in self._binding_data:
             return False
         return self._binding_data[player_name].get("is_banned", False)
     
     def ban_player(self, player_name: str, admin_name: str = "system", reason: str = "") -> bool:
         """封禁玩家"""
+        if self._use_remote():
+            try:
+                return bool(
+                    self._rpc(
+                        "ban_player",
+                        {
+                            "player_name": player_name,
+                            "admin_name": admin_name,
+                            "reason": reason or "",
+                        },
+                    )
+                )
+            except Exception as e:
+                self.logger.error(f"Hub 封禁失败: {e}")
+                return False
         # 确保玩家数据存在
         if player_name not in self._binding_data:
             self._binding_data[player_name] = {
@@ -385,6 +673,17 @@ class DataManager:
     
     def unban_player(self, player_name: str, admin_name: str = "system") -> bool:
         """解封玩家"""
+        if self._use_remote():
+            try:
+                return bool(
+                    self._rpc(
+                        "unban_player",
+                        {"player_name": player_name, "admin_name": admin_name},
+                    )
+                )
+            except Exception as e:
+                self.logger.error(f"Hub 解封失败: {e}")
+                return False
         if player_name not in self._binding_data:
             return False
         
@@ -403,6 +702,9 @@ class DataManager:
     
     def get_banned_players(self) -> List[Dict[str, Any]]:
         """获取所有被封禁的玩家列表"""
+        if self._use_remote():
+            r = self._rpc_safe("get_banned_players", {}, [])
+            return r if isinstance(r, list) else []
         banned_players = [
             {
                 "name": player_name,
@@ -417,6 +719,13 @@ class DataManager:
     
     def get_player_binding_history(self, player_name: str) -> Dict[str, Any]:
         """获取玩家绑定历史信息"""
+        if self._use_remote():
+            r = self._rpc_safe(
+                "get_player_binding_history",
+                {"player_name": player_name},
+                {},
+            )
+            return r if isinstance(r, dict) else {}
         if player_name not in self._binding_data:
             return {}
         
@@ -451,6 +760,13 @@ class DataManager:
     
     def get_complete_player_binding_status(self, player_name: str, player_xuid: str) -> Dict[str, Any]:
         """获取玩家完整的绑定状态信息"""
+        if self._use_remote():
+            r = self._rpc_safe(
+                "get_complete_player_binding_status",
+                {"player_name": player_name, "player_xuid": player_xuid},
+                {},
+            )
+            return r if isinstance(r, dict) else {}
         result = {
             "is_bound": False,
             "qq_number": "",
@@ -503,19 +819,25 @@ class DataManager:
     @property
     def binding_data(self) -> Dict[str, Any]:
         """获取完整绑定数据的副本"""
+        if self._use_remote():
+            r = self._rpc_safe("get_binding_data", {}, {})
+            return r if isinstance(r, dict) else {}
         return self._binding_data.copy()
 
-    # 新的计时器系统方法
+    # 在线时长：进服时记录时间，离服时根据内存中的进服时间计算本次时长并累加
     def start_player_timer(self, player_name: str, player_xuid: str = None):
-        """开始玩家在线计时"""
-        # 检查是否已经在计时中，避免重复计时
+        """记录玩家进服时间（在 PlayerJoinEvent 中调用）"""
+        if self._use_remote():
+            self._rpc_safe(
+                "start_player_timer",
+                {"player_name": player_name, "player_xuid": player_xuid},
+                None,
+            )
+            return
         if player_name in self._online_timer_start_times:
             return
-        
         current_time = int(TimeUtils.get_timestamp())
         self._online_timer_start_times[player_name] = current_time
-        
-        # 确保玩家数据存在，如果不存在则创建
         if player_name not in self._binding_data:
             self._binding_data[player_name] = {
                 "name": player_name,
@@ -526,85 +848,31 @@ class DataManager:
                 "last_quit_time": None,
                 "session_count": 0
             }
-        
-        # 更新XUID（如果提供了新的XUID）
         if player_xuid and not self._binding_data[player_name].get("xuid"):
             self._binding_data[player_name]["xuid"] = player_xuid
-        
-        self.logger.info(f"玩家 {player_name} 开始在线计时")
 
     def stop_player_timer(self, player_name: str):
-        """停止玩家在线计时"""
+        """根据进服时间计算本次在线时长并累加到 total_playtime（在 PlayerQuitEvent 中调用）"""
+        if self._use_remote():
+            self._rpc_safe("stop_player_timer", {"player_name": player_name}, None)
+            return
         if player_name not in self._online_timer_start_times:
             return
-        
         start_time = self._online_timer_start_times[player_name]
         current_time = int(TimeUtils.get_timestamp())
         session_time = current_time - start_time
-        
         if session_time > 0 and player_name in self._binding_data:
-            # 累加到总在线时间
             self._binding_data[player_name]["total_playtime"] = self._binding_data[player_name].get("total_playtime", 0) + session_time
-            self.logger.info(f"玩家 {player_name} 停止在线计时，本次会话时长: {session_time}秒")
-        
-        # 移除计时器记录
         del self._online_timer_start_times[player_name]
 
-    def update_online_timers(self, online_players: List[Any]):
-        """更新所有在线玩家的计时器"""
-        current_time = int(TimeUtils.get_timestamp())
-        
-        # 获取当前在线的玩家名列表
-        online_player_names = set()
-        for player in online_players:
-            if hasattr(player, 'name') and hasattr(player, 'xuid'):
-                online_player_names.add(player.name)
-        
-        # 为新上线但未开始计时的玩家开始计时
-        for player in online_players:
-            if (hasattr(player, 'name') and hasattr(player, 'xuid') and 
-                player.name not in self._online_timer_start_times):
-                self.start_player_timer(player.name, player.xuid)
-        
-        # 停止已离线玩家的计时
-        offline_players = []
-        for player_name in list(self._online_timer_start_times.keys()):
-            if player_name not in online_player_names:
-                offline_players.append(player_name)
-        
-        for player_name in offline_players:
-            self.stop_player_timer(player_name)
-        
-        # 每5分钟保存一次在线时长数据（防止意外关机丢失数据）
-        if current_time - self._last_timer_update >= 300:  # 5分钟
-            self._save_timer_progress()
-            self._last_timer_update = current_time
-
-    def _save_timer_progress(self):
-        """保存当前在线玩家的计时进度"""
-        current_time = int(TimeUtils.get_timestamp())
-        
-        for player_name, start_time in self._online_timer_start_times.items():
-            if player_name in self._binding_data:
-                # 计算从开始计时到现在的时间
-                session_time = current_time - start_time
-                if session_time > 0:
-                    # 累加到总在线时间
-                    self._binding_data[player_name]["total_playtime"] = self._binding_data[player_name].get("total_playtime", 0) + session_time
-                    # 重置开始时间
-                    self._online_timer_start_times[player_name] = current_time
-        
-        # 保存数据
-        self.save_data()
-        if self._online_timer_start_times:
-            self.logger.info(f"已保存 {len(self._online_timer_start_times)} 个在线玩家的计时进度")
-
     def cleanup_timer_system(self):
-        """清理计时器系统（在插件禁用时调用）"""
-        if self._online_timer_start_times:
-            self.logger.info("正在清理在线计时器系统...")
-            # 保存所有在线玩家的最终计时进度
-            self._save_timer_progress()
-            # 清空计时器
-            self._online_timer_start_times.clear()
-            self.logger.info("计时器系统清理完成")
+        """插件禁用时，对仍在内存中的进服记录做一次离服结算并保存"""
+        if self._use_remote():
+            return
+        if not self._online_timer_start_times:
+            return
+        self.logger.info("正在清理在线时长记录...")
+        for player_name in list(self._online_timer_start_times.keys()):
+            self.stop_player_timer(player_name)
+        self.save_data()
+        self.logger.info("在线时长记录已清理并保存")

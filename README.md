@@ -6,7 +6,7 @@
 ![Python](https://img.shields.io/badge/python-3.11+-green.svg)
 ![Endstone](https://img.shields.io/badge/endstone-0.9.4+-orange.svg)
 
-最新构建（未测试）：[Actions](https://github.com/yuexps/endstone-qqsync-plugin/actions "Actions")
+最新构建（未测试）：[Actions](https://github.com/ARC-Minecraft/EndstoneMC-ARC-QQ-Sync-Plugin/actions "Actions")
 
 可选拓展（未完善）：[WebUI](https://github.com/yuexps/endstone-qqsync-webui-plugin "WebUI")
 
@@ -38,7 +38,7 @@
 pip install --upgrade endstone-qqsync-plugin
 ```
 
-#### 手动安装（ 从 [Releases](https://github.com/yuexps/endstone-qqsync-plugin/releases "Releases") 或 [Actions](https://github.com/yuexps/endstone-qqsync-plugin/actions "Actions") 下载 ）
+#### 手动安装（ 从 [Releases](https://github.com/ARC-Minecraft/EndstoneMC-ARC-QQ-Sync-Plugin/releases "Releases") 或 [Actions](https://github.com/ARC-Minecraft/EndstoneMC-ARC-QQ-Sync-Plugin/actions "Actions") 下载 ）
 将插件放到 Endstone 服务器插件目录：
 
 `~/bedrock_server/plugins/endstone_qqsync_plugin-0.0.7-py2.py3-none-any.whl`
@@ -225,7 +225,7 @@ else:
 services:
   endstone:
     container_name: endstone-qqsync
-    image: ghcr.io/yuexps/endstone-qqsync-plugin:latest
+    image: ghcr.io/arc-minecraft/endstonemc-arc-qq-sync-plugin:latest
     init: true
     restart: unless-stopped
     ports:

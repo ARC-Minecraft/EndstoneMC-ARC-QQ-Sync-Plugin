@@ -60,27 +60,11 @@ class WebSocketClient:
                     
                     self.logger.info("✅ 已连接 NapCat WS")
                     
-                    # 连接成功后立即获取所有群成员列表
-                    try:
-                        from .handlers import get_all_groups_member_list
-                        await get_all_groups_member_list(websocket)
-                    except Exception as e:
-                        self.logger.warning(f"获取群成员列表失败: {e}")
-                    
-                    # 发送服务器启动消息（如果插件刚启动）
-                    try:
-                        if hasattr(self.plugin, '_send_startup_message') and self.plugin._send_startup_message:
-                            from .handlers import send_group_msg_to_all_groups
-                            server_start_msg = "[QQSync] 服务器已启动！"
-                            await send_group_msg_to_all_groups(websocket, server_start_msg)
-                            self.plugin._send_startup_message = False  # 只发送一次
-                    except Exception as e:
-                        self.logger.warning(f"发送启动消息失败: {e}")
-                    
-                    # 启动心跳和消息处理
+                    # 启动心跳、消息处理与连接后初始化并行：成员列表响应需在消息循环中处理完毕后才能比对群名片
                     await asyncio.gather(
                         self._heartbeat(),
-                        self._message_loop()
+                        self._message_loop(),
+                        self._run_post_connect_tasks(websocket),
                     )
                     
             except Exception as e:
@@ -107,6 +91,27 @@ class WebSocketClient:
                 delay = 1
 
         self.logger.info("NapCat WS 客户端已停止运行")
+
+    async def _run_post_connect_tasks(self, websocket):
+        """连接成功后：拉取成员列表缓存 → 按需同步群名片 → 可选发送启动播报"""
+        try:
+            from .handlers import prepare_group_member_cache_and_wait, sync_all_group_cards
+
+            await prepare_group_member_cache_and_wait(websocket)
+            if self.plugin.config_manager.get_config("sync_group_card", True):
+                await sync_all_group_cards(websocket)
+        except Exception as e:
+            self.logger.warning(f"启动时群成员/群名片同步失败: {e}")
+
+        try:
+            if hasattr(self.plugin, "_send_startup_message") and self.plugin._send_startup_message:
+                from .handlers import send_group_msg_to_all_groups
+
+                server_start_msg = "[QQSync] 服务器已启动！"
+                await send_group_msg_to_all_groups(websocket, server_start_msg)
+                self.plugin._send_startup_message = False
+        except Exception as e:
+            self.logger.warning(f"发送启动消息失败: {e}")
 
     async def _heartbeat(self):
         """发送心跳包 - 使用state属性检查连接状态"""

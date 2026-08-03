@@ -13,7 +13,7 @@ authors = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/yuexps/endstone-qqsync-plugin"
+Homepage = "https://github.com/ARC-Minecraft/EndstoneMC-ARC-QQ-Sync-Plugin"
 
 [project.entry-points."endstone"]
 qqsync-plugin = "endstone_qqsync_plugin.qqsync_plugin:qqsync"

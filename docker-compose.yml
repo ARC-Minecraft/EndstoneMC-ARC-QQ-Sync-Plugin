@@ -1,7 +1,7 @@
 services:
   endstone:
     container_name: endstone-qqsync
-    image: ghcr.io/yuexps/endstone-qqsync-plugin:latest
+    image: ghcr.io/arc-minecraft/endstonemc-arc-qq-sync-plugin:latest
     init: true
     restart: unless-stopped
     ports:

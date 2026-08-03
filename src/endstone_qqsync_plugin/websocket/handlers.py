@@ -5,11 +5,13 @@ WebSocket消息处理函数
 import asyncio
 import json
 import datetime
+from typing import Optional
 from endstone import ColorFormat
 from ..utils.time_utils import TimeUtils
 from endstone.command import CommandSenderWrapper
 from endstone.lang import Language,Translatable
 from ..utils.helpers import format_playtime
+from ..utils.message_utils import strip_minecraft_format_codes
 import queue
 import html
 
@@ -17,7 +19,6 @@ import html
 # 全局变量引用
 _plugin_instance = None
 _current_ws = None
-_verification_messages = {}
 
 
 def set_plugin_instance(plugin):
@@ -26,9 +27,36 @@ def set_plugin_instance(plugin):
     _plugin_instance = plugin
 
 
+def _parse_group_id_from_member_list_echo(echo: str):
+    """从 get_group_member_list 的 echo 中解析 group_id（格式 get_group_member_list:{group_id}:...）"""
+    if not echo.startswith("get_group_member_list:"):
+        return None
+    parts = echo.split(":")
+    if len(parts) < 2:
+        return None
+    try:
+        return int(parts[1])
+    except ValueError:
+        return None
+
+
+def _release_member_list_pending(group_id: int):
+    """收到某群的成员列表（成功或失败）后，减少等待计数并在全部完成时通知。"""
+    if not _plugin_instance:
+        return
+    pending = getattr(_plugin_instance, "member_list_pending_groups", None)
+    if pending is None or group_id not in pending:
+        return
+    pending.discard(group_id)
+    ev = getattr(_plugin_instance, "member_list_ready_event", None)
+    if not pending and ev and not ev.is_set():
+        ev.set()
+
+
 async def send_group_msg(ws, group_id: int, text: str):
     """发送群消息 - OneBot V11 API"""
     try:
+        text = strip_minecraft_format_codes(text)
         payload = {
             "action": "send_group_msg",
             "params": {
@@ -59,6 +87,7 @@ async def send_group_msg_to_all_groups(ws, text: str):
 async def send_group_msg_with_at(ws, group_id: int, user_id: int, text: str):
     """发送@用户的群消息 - OneBot V11 API"""
     try:
+        text = strip_minecraft_format_codes(text)
         payload = {
             "action": "send_group_msg",
             "params": {
@@ -74,100 +103,6 @@ async def send_group_msg_with_at(ws, group_id: int, user_id: int, text: str):
     except Exception as e:
         if _plugin_instance:
             _plugin_instance.logger.error(f"发送@消息失败: {e}")
-
-
-async def send_group_at_msg(ws, group_id: int, user_id: int, text: str, verification_qq: str = None):
-    """发送@消息（用于验证码）- OneBot V11 API"""
-    try:
-        global _verification_messages
-        
-        echo_value = f"verification_msg:{verification_qq}" if verification_qq else f"at_msg_{int(TimeUtils.get_timestamp())}"
-        payload = {
-            "action": "send_group_msg", 
-            "params": {
-                "group_id": group_id,
-                "message": [
-                    {"type": "at", "data": {"qq": str(user_id)}},
-                    {"type": "text", "data": {"text": f" {text}"}}
-                ]
-            },
-            "echo": echo_value
-        }
-        
-        # 如果是验证码消息，为兼容性创建handlers记录
-        if verification_qq:
-            _verification_messages[verification_qq] = {
-                "echo": echo_value,
-                "message_id": None,
-                "timestamp": TimeUtils.get_timestamp()
-            }
-            if _plugin_instance:
-                _plugin_instance.logger.debug(f"为QQ {verification_qq} 创建handlers验证码消息记录，echo: {echo_value}")
-        
-        await ws.send(json.dumps(payload))
-        
-        # 设置紧急撤回任务（90秒后）
-        if verification_qq:
-            async def emergency_retract():
-                await asyncio.sleep(90)  # 90秒
-                try:
-                    # 通过 verification_manager 统一管理验证码撤回
-                    if hasattr(_plugin_instance, 'verification_manager'):
-                        await _plugin_instance.verification_manager.delete_verification_message_by_qq(verification_qq)
-                except Exception as e:
-                    if _plugin_instance:
-                        _plugin_instance.logger.warning(f"紧急撤回验证码失败: {e}")
-            
-            asyncio.create_task(emergency_retract())
-        
-    except Exception as e:
-        if _plugin_instance:
-            _plugin_instance.logger.error(f"发送@消息失败: {e}")
-
-
-async def delete_verification_message(qq_number: str, retry_count: int = 0):
-    """删除验证码消息"""
-    global _verification_messages
-    
-    try:
-        # 优先使用verification_manager的方法
-        if (_plugin_instance and 
-            hasattr(_plugin_instance, 'verification_manager') and 
-            hasattr(_plugin_instance.verification_manager, 'delete_verification_message_by_qq')):
-            await _plugin_instance.verification_manager.delete_verification_message_by_qq(qq_number)
-            return
-        
-        # 回退到handlers的实现（兼容性）
-        if qq_number not in _verification_messages:
-            return
-        
-        message_info = _verification_messages[qq_number]
-        message_id = message_info.get("message_id")
-        
-        if not message_id:
-            if _plugin_instance:
-                _plugin_instance.logger.debug(f"QQ {qq_number} 的验证码消息ID未获取到，无法撤回")
-            return
-        
-        # 发送撤回请求
-        if _plugin_instance and _plugin_instance._current_ws:
-            await delete_msg(_plugin_instance._current_ws, message_id)
-        
-        # 清理记录
-        del _verification_messages[qq_number]
-        
-        if _plugin_instance:
-            _plugin_instance.logger.debug(f"已撤回QQ {qq_number} 的验证码消息")
-            
-    except Exception as e:
-        if retry_count < 2:  # 最多重试2次
-            if _plugin_instance:
-                _plugin_instance.logger.warning(f"撤回验证码消息失败，准备重试: {e}")
-            await asyncio.sleep(1)
-            await delete_verification_message(qq_number, retry_count + 1)
-        else:
-            if _plugin_instance:
-                _plugin_instance.logger.error(f"撤回验证码消息失败（重试{retry_count}次后放弃）: {e}")
 
 
 async def delete_msg(ws, message_id: int):
@@ -202,7 +137,6 @@ async def set_group_card(ws, group_id: int, user_id: int, card: str):
             _plugin_instance.logger.info(f"🏷️ 尝试设置群昵称: QQ={user_id}, 群={group_id}, 昵称='{card}'")
         await ws.send(json.dumps(payload))
     except Exception as e:
-        # 让异常向上传播，由调用者(verification_manager)处理日志
         raise e
 
 
@@ -219,6 +153,84 @@ async def set_group_card_in_all_groups(ws, user_id: int, card: str):
             _plugin_instance.logger.error(f"在所有群组中设置群昵称失败: {e}")
 
 
+async def prepare_group_member_cache_and_wait(ws, timeout: float = 25.0):
+    """
+    请求各群成员列表并写入 group_member_cards，等待全部返回或超时。
+    需在消息循环已运行的情况下调用，否则无法收到 API 响应。
+    """
+    if not _plugin_instance:
+        return
+    target_groups = _plugin_instance.config_manager.get_config("target_groups", [])
+    target_groups = [int(gid) for gid in target_groups]
+    if not target_groups:
+        return
+
+    plugin = _plugin_instance
+    plugin.group_member_cards = {}
+    plugin.member_list_pending_groups = set(target_groups)
+    plugin.member_list_ready_event = asyncio.Event()
+
+    await get_all_groups_member_list(ws)
+
+    try:
+        await asyncio.wait_for(plugin.member_list_ready_event.wait(), timeout=timeout)
+        plugin.logger.info("群成员列表已全部返回，群名片缓存可用于启动同步")
+    except asyncio.TimeoutError:
+        pending_left = getattr(plugin, "member_list_pending_groups", None)
+        plugin.logger.warning(
+            f"等待群成员列表超时 ({timeout}s)，仍未返回的群: {pending_left}"
+        )
+    finally:
+        plugin.member_list_pending_groups = None
+        plugin.member_list_ready_event = None
+
+
+async def sync_all_group_cards(ws):
+    """启动时批量同步：仅对群名片与游戏名不一致的成员调用 set_group_card（依赖 prepare_group_member_cache_and_wait）。"""
+    try:
+        binding_data = _plugin_instance.data_manager.binding_data
+        target_groups = _plugin_instance.config_manager.get_config("target_groups", [])
+        target_groups = [int(gid) for gid in target_groups]
+        cards_root = getattr(_plugin_instance, "group_member_cards", None) or {}
+
+        updated_count = 0
+        skipped_count = 0
+
+        for player_name, data in binding_data.items():
+            qq_number = data.get("qq", "")
+            if not qq_number or not str(qq_number).strip():
+                continue
+            qq_str = str(int(qq_number))
+            desired = player_name.strip()
+
+            for group_id in target_groups:
+                group_cache = cards_root.get(group_id)
+                if group_cache is not None:
+                    if qq_str not in group_cache:
+                        skipped_count += 1
+                        continue
+                    current_card = (group_cache.get(qq_str) or "").strip()
+                    if current_card == desired:
+                        skipped_count += 1
+                        continue
+
+                try:
+                    await set_group_card(ws, group_id, int(qq_str), desired)
+                    updated_count += 1
+                    await asyncio.sleep(0.05)
+                except Exception as e:
+                    _plugin_instance.logger.warning(
+                        f"同步玩家 {player_name} (QQ: {qq_number}) 群 {group_id} 名片失败: {e}"
+                    )
+
+        _plugin_instance.logger.info(
+            f"启动时群名片同步完成：实际修改 {updated_count} 次，跳过（已一致或不在群）{skipped_count} 次"
+        )
+    except Exception as e:
+        if _plugin_instance:
+            _plugin_instance.logger.error(f"群名片批量同步失败: {e}")
+
+
 async def get_group_member_list(ws, group_id: int):
     """获取群成员列表 - OneBot V11 API"""
     try:
@@ -227,7 +239,7 @@ async def get_group_member_list(ws, group_id: int):
             "params": {
                 "group_id": group_id
             },
-            "echo": f"get_group_member_list_{int(TimeUtils.get_timestamp())}"
+            "echo": f"get_group_member_list:{group_id}:{int(TimeUtils.get_timestamp())}"
         }
         await ws.send(json.dumps(payload))
         if _plugin_instance:
@@ -285,174 +297,29 @@ async def handle_message(ws, data: dict):
         bound_player = _plugin_instance.data_manager.get_qq_player(str(user_id))
         if bound_player:
             display_name = bound_player  # 使用玩家游戏ID作为显示名
+            if _plugin_instance.config_manager.get_config("sync_group_card", True):
+                current_card = (card or "").strip()
+                if current_card != bound_player:
+                    try:
+                        await set_group_card_in_all_groups(ws, int(user_id), bound_player)
+                    except Exception as e:
+                        _plugin_instance.logger.warning(f"发言时纠正群名片失败 (QQ={user_id}, 游戏名={bound_player}): {e}")
         else:
             display_name = card if card else nickname  # 使用QQ群昵称或QQ昵称
         
-        # 处理验证码
-        if raw_message.isdigit() and len(raw_message) == 6:
-            await _handle_verification_code(user_id, raw_message, display_name)
-            return
-        
         # 处理群内命令（包括管理员和普通用户命令）
         if raw_message.startswith("/"):
-            await _handle_group_command(ws, user_id, raw_message, display_name, group_id)
+            await _handle_group_command(
+                ws, user_id, raw_message, display_name, group_id, sender=sender
+            )
             return
         
         # 转发消息到游戏
-        if _plugin_instance.config_manager.get_config("enable_qq_to_game", True):
-            await _forward_message_to_game(data, display_name)
+        await _forward_message_to_game(data, display_name)
             
     except Exception as e:
         if _plugin_instance:
             _plugin_instance.logger.error(f"处理群消息失败: {e}")
-
-
-async def _handle_verification_code(user_id: int, code: str, display_name: str):
-    """处理验证码"""
-    try:
-        qq_str = str(user_id)
-        
-        # 检查是否是有效的验证码
-        if qq_str not in _plugin_instance.verification_manager.verification_codes:
-            return
-        
-        verification_info = _plugin_instance.verification_manager.verification_codes[qq_str]
-        player_name = verification_info.get("player_name")
-        
-        if not player_name:
-            return
-        
-        # 查找对应的在线玩家
-        target_player = None
-        for player in _plugin_instance.server.online_players:
-            if player.name == player_name:
-                target_player = player
-                break
-        
-        if not target_player:
-            _plugin_instance.logger.debug(f"玩家 {player_name} 不在线，跳过QQ验证码处理")
-            return
-        
-        # 验证验证码
-        success, message, pending_info = _plugin_instance.verification_manager.verify_code(
-            player_name, target_player.xuid, code, "qq"
-        )
-        
-        if success:
-            # 绑定成功 - 数据绑定由 data_manager 处理
-            _plugin_instance.data_manager.bind_player_qq(player_name, target_player.xuid, qq_str)
-            
-            # 注意：验证数据清理、验证码撤回和成功播报已在 verification_manager.verify_code() 中统一处理
-            
-            # 通知玩家 - 使用调度器确保在主线程执行
-            def notify_player():
-                """在主线程中通知玩家绑定成功"""
-                try:
-                    if _plugin_instance.is_valid_player(target_player):
-                        target_player.send_message(f"{ColorFormat.GRAY}[QQsync] {ColorFormat.GREEN}[成功] QQ绑定成功！{ColorFormat.RESET}")
-                        target_player.send_message(f"{ColorFormat.GRAY}[QQsync] {ColorFormat.AQUA}您的QQ {qq_str} 已与游戏账号绑定{ColorFormat.RESET}")
-                except Exception as e:
-                    if _plugin_instance:
-                        _plugin_instance.logger.error(f"通知玩家绑定成功失败: {e}")
-            
-            # 使用调度器在主线程执行通知
-            _plugin_instance.server.scheduler.run_task(_plugin_instance, notify_player, delay=1)
-            
-            # 恢复玩家权限
-            if _plugin_instance.config_manager.get_config("force_bind_qq", True):
-                _plugin_instance.server.scheduler.run_task(
-                    _plugin_instance,
-                    lambda: _plugin_instance.permission_manager.restore_player_permissions(target_player),
-                    delay=2
-                )
-            
-            _plugin_instance.logger.info(f"QQ验证成功: 玩家 {player_name} (QQ: {qq_str}) 通过群内验证")
-        else:
-            # 验证失败，发送错误消息到群
-            if _plugin_instance._current_ws:
-                target_groups = _plugin_instance.config_manager.get_config("target_groups", [])
-                # 添加类型转换，确保group_id为整数类型
-                target_groups = [int(gid) for gid in target_groups]
-                for group_id in target_groups:
-                    await send_group_msg(_plugin_instance._current_ws, group_id=group_id, 
-                                       text=f"@{display_name} {message}")
-            
-    except Exception as e:
-        if _plugin_instance:
-            _plugin_instance.logger.error(f"处理QQ验证码失败: {e}")
-
-
-async def _handle_verification_code_with_feedback(ws, user_id: int, code: str, display_name: str, group_id: int):
-    """处理验证码（带反馈）- 专用于/verify命令"""
-    try:
-        qq_str = str(user_id)
-        
-        # 检查是否是有效的验证码
-        if qq_str not in _plugin_instance.verification_manager.verification_codes:
-            await send_group_msg(ws, group_id, f"@{display_name} ❌ 您没有待验证的绑定请求\n💡 请先在游戏中使用 /bindqq 命令申请绑定")
-            return False
-        
-        verification_info = _plugin_instance.verification_manager.verification_codes[qq_str]
-        player_name = verification_info.get("player_name")
-        
-        if not player_name:
-            await send_group_msg(ws, group_id, f"@{display_name} ❌ 验证信息异常，请重新申请绑定")
-            return False
-        
-        # 查找对应的在线玩家
-        target_player = None
-        for player in _plugin_instance.server.online_players:
-            if player.name == player_name:
-                target_player = player
-                break
-        
-        if not target_player:
-            await send_group_msg(ws, group_id, f"@{display_name} ❌ 玩家 {player_name} 不在线\n💡 请确保对应的游戏角色在线后再验证")
-            return False
-        
-        # 验证验证码
-        success, message, pending_info = _plugin_instance.verification_manager.verify_code(
-            player_name, target_player.xuid, code, "qq"
-        )
-        
-        if success:
-            # 绑定成功 - 数据绑定由 data_manager 处理
-            _plugin_instance.data_manager.bind_player_qq(player_name, target_player.xuid, qq_str)
-            
-            # 通知玩家 - 使用调度器确保在主线程执行
-            def notify_player():
-                """在主线程中通知玩家绑定成功"""
-                try:
-                    if _plugin_instance.is_valid_player(target_player):
-                        target_player.send_message(f"{ColorFormat.GRAY}[QQsync] {ColorFormat.GREEN}[成功] QQ绑定成功！{ColorFormat.RESET}")
-                        target_player.send_message(f"{ColorFormat.GRAY}[QQsync] {ColorFormat.AQUA}您的QQ {qq_str} 已与游戏账号绑定{ColorFormat.RESET}")
-                except Exception as e:
-                    if _plugin_instance:
-                        _plugin_instance.logger.error(f"通知玩家绑定成功失败: {e}")
-            
-            # 使用调度器在主线程执行通知
-            _plugin_instance.server.scheduler.run_task(_plugin_instance, notify_player, delay=1)
-            
-            # 恢复玩家权限
-            if _plugin_instance.config_manager.get_config("force_bind_qq", True):
-                _plugin_instance.server.scheduler.run_task(
-                    _plugin_instance,
-                    lambda: _plugin_instance.permission_manager.restore_player_permissions(target_player),
-                    delay=2
-                )
-            
-            _plugin_instance.logger.info(f"QQ验证成功: 玩家 {player_name} (QQ: {qq_str}) 通过群内/verify命令验证")
-            return True
-        else:
-            # 验证失败，发送错误消息到群
-            await send_group_msg(ws, group_id, f"@{display_name} ❌ {message}")
-            return False
-            
-    except Exception as e:
-        if _plugin_instance:
-            _plugin_instance.logger.error(f"处理/verify命令失败: {e}")
-        await send_group_msg(ws, group_id, f"@{display_name} ❌ 验证过程发生错误，请稍后重试")
-        return False
 
 
 def _resolve_target(input_str: str):
@@ -489,11 +356,161 @@ def _resolve_target(input_str: str):
     return None, None
 
 
-async def _handle_group_command(ws, user_id: int, raw_message: str, display_name: str, group_id: int):
+def _run_server_console_command(command_to_execute: str) -> str:
+    """在服务器主线程执行控制台命令，返回发往QQ群的回复文本。"""
+    command_to_execute = html.unescape(command_to_execute.strip())
+    if not command_to_execute:
+        return "❌ 命令为空"
+
+    msg_ret = []
+    error_ret = []
+    success = False
+
+    try:
+        result_queue = queue.Queue()
+        language = _plugin_instance.server.language
+
+        def on_message(msg):
+            if isinstance(msg, str):
+                msg_ret.append(msg)
+            else:
+                try:
+                    translated = language.translate(msg, language.locale)
+                    msg_ret.append(translated)
+                except Exception as e:
+                    msg_ret.append(f"[消息翻译失败: {e}]")
+
+        def on_error(err):
+            if isinstance(err, str):
+                error_ret.append(err)
+            else:
+                try:
+                    translated = language.translate(err)
+                    error_ret.append(translated)
+                except Exception as e:
+                    error_ret.append(f"[错误翻译失败: {e}]")
+
+        wrapper = CommandSenderWrapper(
+            sender=_plugin_instance.server.command_sender,
+            on_message=on_message,
+            on_error=on_error
+        )
+
+        def server_thread():
+            try:
+                success_result = _plugin_instance.server.dispatch_command(wrapper, command_to_execute)
+                result_queue.put((success_result, None))
+            except Exception as e:
+                result_queue.put((False, str(e)))
+
+        _plugin_instance.server.scheduler.run_task(_plugin_instance, server_thread, 0, 0)
+        success, error = result_queue.get(block=True, timeout=10)
+
+        if error:
+            raise Exception(error)
+
+        lines = []
+        lines.extend(msg_ret)
+        lines.extend([f"[ERROR] {e}" for e in error_ret])
+        output_text = "\n".join(lines) if lines else "无返回值"
+        status = "成功" if success else "失败, 请检查命令语法或权限"
+        return f"✅ 命令已执行: /{command_to_execute}\n状态: {status}\n输出:\n{output_text}"
+
+    except queue.Empty:
+        return "❌ 命令执行超时"
+    except Exception as e:
+        return f"❌ 命令执行失败: {str(e)}"
+
+
+async def _handle_restart_vote_local(ws, user_id: int, group_id: int) -> str:
+    """单机（无 Hub）时在本地处理 /重启 投票。"""
+    if not _plugin_instance:
+        return "❌ 插件未就绪"
+
+    qq_str = str(user_id)
+    player_name = _plugin_instance.data_manager.get_qq_player(qq_str)
+    if not player_name:
+        return "❌ 请先使用 /绑定 <玩家名> 绑定游戏角色后再参与重启投票"
+
+    online_names = {p.name for p in _plugin_instance.server.online_players}
+    if player_name not in online_names:
+        return "❌ 您当前未在线，无法发起或参与重启投票"
+
+    server_name = _plugin_instance.server_name
+    server_id = getattr(_plugin_instance, "hub_numeric_server_id", None) or 1
+    vote_mgr = _plugin_instance.restart_vote_manager
+
+    async def on_timeout(sid: int, vote_state):
+        await send_group_msg(
+            ws,
+            vote_state.group_id,
+            f"❌ [{vote_state.server_name}] 重启投票已结束，未能在规定时间内获得足够票数",
+        )
+
+    async def on_passed(vote_state):
+        await send_group_msg(
+            ws,
+            vote_state.group_id,
+            f"✅ [{vote_state.server_name}] 重启投票已通过！服务器即将关闭…",
+        )
+        vote_mgr.clear_vote(vote_state.server_id)
+        _run_server_console_command("stop")
+
+    active = vote_mgr.get_vote(server_id)
+    if active:
+        reply, passed = vote_mgr.add_vote(server_id, player_name, on_passed)
+    else:
+        reply, passed = vote_mgr.start_vote(
+            server_id=server_id,
+            server_name=server_name,
+            group_id=group_id,
+            online_players=online_names,
+            initiator_name=player_name,
+            on_timeout=on_timeout,
+            on_passed=on_passed,
+        )
+
+    if passed:
+        vote = vote_mgr.get_vote(server_id)
+        if vote:
+            await on_passed(vote)
+    return reply
+
+
+def _is_qq_group_admin(sender: Optional[dict]) -> bool:
+    """判断发言者是否为 QQ 群主或群管理员（OneBot sender.role）。"""
+    role = (sender or {}).get("role", "member")
+    return role in ("owner", "admin")
+
+
+def _hub_command_target_applies_here(target_sid: Optional[int]) -> bool:
+    """Hub 子服定向：无编号或本机编号匹配时才执行。"""
+    if target_sid is None:
+        return True
+    my_id = getattr(_plugin_instance, "hub_numeric_server_id", None)
+    if my_id is None:
+        return True
+    return my_id == target_sid
+
+
+async def _handle_group_command(
+    ws,
+    user_id: int,
+    raw_message: str,
+    display_name: str,
+    group_id: int,
+    sender: Optional[dict] = None,
+):
     """处理群内命令"""
     try:
-        # 解析命令
-        cmd_parts = raw_message.strip().split()
+        from ..utils.message_utils import parse_hub_command_routing
+
+        effective_line, route_sid = parse_hub_command_routing(raw_message)
+        if not _hub_command_target_applies_here(route_sid):
+            return
+
+        # 解析命令（使用去掉子服编号后的文本）
+        cmd_parts = effective_line.strip().split()
         if not cmd_parts:
             return
         
@@ -501,16 +518,40 @@ async def _handle_group_command(ws, user_id: int, raw_message: str, display_name
         args = cmd_parts[1:] if len(cmd_parts) > 1 else []
         
         admins = _plugin_instance.config_manager.get_config("admins", [])
-        is_admin = str(user_id) in admins
+        is_config_admin = str(user_id) in admins
+        is_group_admin = _is_qq_group_admin(sender)
+        can_use_cmd = is_config_admin or is_group_admin
         
         reply = ""
         
         # /help 命令
         if cmd == "help":
-            if is_admin:
+            if is_config_admin:
                 reply = _plugin_instance.config_manager.get_help_text_with_admin()
+            elif is_group_admin:
+                reply = _plugin_instance.config_manager.get_help_text_with_group_admin()
             else:
                 reply = _plugin_instance.config_manager.get_help_text()
+
+        # /servers — Hub 子服编号列表（所有用户可用）
+        elif cmd in ("servers", "hublist"):
+            cat = _plugin_instance.get_hub_server_catalog_display()
+            my_id = getattr(_plugin_instance, "hub_numeric_server_id", None)
+            if not cat:
+                reply = (
+                    "🌐 当前未处于 Hub 模式或未同步子服列表。\n"
+                    "💡 使用 Hub 中转并联机后，可在此查看各服数字编号。"
+                )
+            else:
+                lines = [
+                    "🌐 Hub 服务器编号（省略编号则命令在所有子服执行；"
+                    "指定编号则仅该服执行）：",
+                ]
+                for item in cat:
+                    lines.append(f"• {item.get('id')}: {item.get('name')}")
+                if my_id is not None:
+                    lines.append(f"\n本群命令当前执行端编号: {my_id}")
+                reply = "\n".join(lines)
         
         # /list 命令 - 查看在线玩家列表
         elif cmd == "list":
@@ -520,19 +561,12 @@ async def _handle_group_command(ws, user_id: int, raw_message: str, display_name
             else:
                 player_list = []
                 for player in online_players:
-                    # 获取玩家延迟
                     try:
                         ping = player.ping
                         ping_display = f"{ping}ms"
-                    except:
+                    except Exception:
                         ping_display = "N/A"
-                    
-                    # 检查玩家绑定状态
-                    bound_qq = _plugin_instance.data_manager.get_player_qq(player.name)
-                    if bound_qq:
-                        player_list.append(f"• {player.name} [{ping_display}]")
-                    else:
-                        player_list.append(f"• {player.name} [未绑定QQ]")
+                    player_list.append(f"• {player.name} [{ping_display}]")
                 
                 reply = f"🎮 在线玩家 ({len(online_players)}/{_plugin_instance.server.max_players}):\n" + "\n".join(player_list)
         
@@ -576,7 +610,7 @@ async def _handle_group_command(ws, user_id: int, raw_message: str, display_name
                 
                 online_count = len(_plugin_instance.server.online_players)
                 max_players = _plugin_instance.server.max_players
-                server_name = _plugin_instance.server.name
+                server_name = _plugin_instance.server_name
                 version = _plugin_instance.server.version
                 minecraft_version = _plugin_instance.server.minecraft_version
                 start_time = _plugin_instance.server.start_time
@@ -647,169 +681,107 @@ async def _handle_group_command(ws, user_id: int, raw_message: str, display_name
                     except:
                         reply = "ℹ️ 服务器信息获取失败"
         
-        # /bindqq 命令 - 查看绑定状态
-        elif cmd == "bindqq":
-            from ..utils.time_utils import TimeUtils
-            bound_player = _plugin_instance.data_manager.get_qq_player(str(user_id))
-            if bound_player:
-                player_data = _plugin_instance.data_manager.binding_data.get(bound_player, {})
-                
-                reply = f"=== 您的绑定信息 ===\n"
-                reply += f"绑定角色: {bound_player}\n"
-                reply += f"绑定QQ: {user_id}\n"
-                
-                # 显示XUID
-                xuid = player_data.get("xuid", "")
-                if xuid:
-                    reply += f"XUID: {xuid}\n"
-                
-                # 检查在线状态
-                is_online = any(player.name == bound_player for player in _plugin_instance.server.online_players)
-                reply += f"当前状态: {'在线' if is_online else '离线'}\n"
-                
-                # 检查封禁状态
-                if _plugin_instance.data_manager.is_player_banned(bound_player):
-                    reply += "状态: 已封禁 ❌\n"
-                else:
-                    reply += "状态: 正常 ✅\n"
-                
-                # 添加游戏统计信息
-                reply += "\n📊 游戏统计:\n"
-                
-                # 游戏时长
-                total_playtime = player_data.get("total_playtime", 0)
-                # 游戏时长
-                total_playtime = player_data.get("total_playtime", 0)
-                if total_playtime > 0:
-                    playtime_str = format_playtime(total_playtime)
-                    reply += f"总游戏时长: {playtime_str}\n"
-                else:
-                    reply += "总游戏时长: 无记录\n"
-                
-                # 登录次数
-                session_count = player_data.get("session_count", 0)
-                reply += f"登录次数: {session_count}次\n"
-                
-                # 绑定时间
-                bind_time = player_data.get("bind_time")
-                if bind_time:
-                    try:
-                        bind_time_dt = datetime.datetime.fromtimestamp(bind_time)
-                        bind_time_str = TimeUtils.format_datetime(bind_time_dt)
-                        reply += f"绑定时间: {bind_time_str}\n"
-                    except (ValueError, TypeError):
-                        reply += f"绑定时间: 时间格式错误\n"
-                
-                # 最后登录时间
-                last_join_time = player_data.get("last_join_time")
-                if last_join_time:
-                    try:
-                        last_join_dt = datetime.datetime.fromtimestamp(last_join_time)
-                        last_join_str = TimeUtils.format_datetime(last_join_dt)
-                        reply += f"最后登录: {last_join_str}"
-                    except (ValueError, TypeError):
-                        reply += f"最后登录: 时间格式错误"
-                else:
-                    reply += "最后登录: 无记录"
+        # /重启 — 由 Hub 集中处理；非 Hub 单机时在本机处理
+        elif cmd == "重启":
+            hub = getattr(_plugin_instance, "_hub_server", None)
+            if hub is not None:
+                return
+            reply = await _handle_restart_vote_local(ws, user_id, group_id)
+
+        # /绑定 <玩家名> — 在群内将当前QQ绑定到指定游戏角色（需服务器记录中存在该角色）
+        elif cmd == "绑定":
+            if len(args) != 1:
+                reply = "❌ 命令格式错误\n💡 正确用法：/绑定 <游戏内玩家名>\n💡 例如：/绑定 DEVILENMO"
             else:
-                reply = "您的QQ尚未绑定游戏角色\n请在游戏中使用 /bindqq 命令开始绑定流程"
-        
-        # /verify 命令 - 验证QQ绑定
-        elif cmd == "verify":
-            if len(args) == 1:
-                verification_code = args[0]
-                # 检查验证码格式（6位数字）
-                if not verification_code.isdigit() or len(verification_code) != 6:
-                    reply = f"❌ 验证码格式错误\n💡 请输入6位数字验证码，例如：/verify 123456"
+                target_player_name = args[0].strip()
+                qq_str = str(user_id)
+                dm = _plugin_instance.data_manager
+
+                if not target_player_name:
+                    reply = "❌ 玩家名不能为空"
+                elif dm.is_player_banned(target_player_name):
+                    reply = f"❌ 玩家 {target_player_name} 已被封禁，无法绑定QQ"
                 else:
-                    result = await _handle_verification_code_with_feedback(ws, user_id, verification_code, display_name, group_id)
-                    if result:
-                        return  # 验证码处理成功，有自己的回复逻辑
+                    existing_for_qq = dm.get_qq_player(qq_str)
+                    if existing_for_qq and existing_for_qq != target_player_name:
+                        reply = (
+                            f"❌ 您的QQ已绑定游戏角色「{existing_for_qq}」\n"
+                            "💡 如需改绑请先联系管理员解绑，避免恶意占用多个角色"
+                        )
+                    elif target_player_name not in dm.binding_data:
+                        reply = (
+                            f"❌ 服务器记录中找不到名为「{target_player_name}」的玩家\n"
+                            "💡 请先在游戏中至少登录一次，再于群内绑定"
+                        )
+                    elif dm.is_player_bound(target_player_name):
+                        bound_qq = dm.get_player_qq(target_player_name)
+                        if bound_qq == qq_str:
+                            reply = f"✅ 您的QQ已与游戏角色「{target_player_name}」绑定，无需重复操作"
+                        else:
+                            reply = (
+                                f"❌ 游戏角色「{target_player_name}」已绑定其他QQ\n"
+                                f"💡 该角色当前绑定QQ: {bound_qq}\n"
+                                "💡 若需更换绑定请联系管理员，请勿抢绑他人账号"
+                            )
                     else:
-                        # 验证失败，不需要设置reply因为函数内已经发送了回复
-                        return
-            else:
-                reply = f"❌ 命令格式错误\n💡 正确用法：/verify <验证码>\n💡 例如：/verify 123456"
+                        group_ok = True
+                        if hasattr(_plugin_instance, "group_members") and _plugin_instance.group_members:
+                            if qq_str not in _plugin_instance.group_members:
+                                group_ok = False
+                                reply = "❌ 无法确认您的QQ在本群内，请稍后再试或联系管理员刷新群成员缓存"
+                        if group_ok:
+                            stored = dm.binding_data.get(target_player_name, {})
+                            player_xuid = (stored.get("xuid") or "").strip()
+                            target_player_obj = None
+                            for p in _plugin_instance.server.online_players:
+                                if p.name == target_player_name:
+                                    target_player_obj = p
+                                    player_xuid = p.xuid
+                                    break
+                            if dm.bind_player_qq(target_player_name, player_xuid, qq_str):
+                                _plugin_instance.logger.info(
+                                    f"群内 /绑定 成功: 角色 {target_player_name} <- QQ {qq_str}"
+                                )
+
+                                def notify_bound_player():
+                                    try:
+                                        if target_player_obj and _plugin_instance.is_valid_player(target_player_obj):
+                                            target_player_obj.send_message(
+                                                f"{ColorFormat.GRAY}[QQsync] {ColorFormat.GREEN}[成功] QQ绑定成功！{ColorFormat.RESET}"
+                                            )
+                                            target_player_obj.send_message(
+                                                f"{ColorFormat.GRAY}[QQsync] {ColorFormat.AQUA}您的QQ {qq_str} 已与游戏账号绑定{ColorFormat.RESET}"
+                                            )
+                                    except Exception as notify_err:
+                                        _plugin_instance.logger.error(f"通知玩家绑定成功失败: {notify_err}")
+
+                                _plugin_instance.server.scheduler.run_task(
+                                    _plugin_instance, notify_bound_player, delay=1
+                                )
+                                await send_group_msg_with_at(
+                                    ws, group_id, int(qq_str), f"玩家 {target_player_name} 已成功绑定QQ！"
+                                )
+                                if _plugin_instance.config_manager.get_config("sync_group_card", True):
+                                    await set_group_card_in_all_groups(ws, user_id=int(qq_str), card=target_player_name)
+                            else:
+                                reply = "❌ 绑定失败，请稍后重试或联系管理员"
         
-        # === 管理员命令 ===
-        elif is_admin:
-            if cmd == "cmd" and len(args) >= 1:
-                command_to_execute = " ".join(args)
-                # 转义HTML字符
-                command_to_execute = html.unescape(command_to_execute)
-                # 返回的信息和状态
-                msg_ret = []
-                error_ret = []
-                success = False
+        # /cmd — 群管理员或插件配置管理员
+        elif cmd == "cmd":
+            if not can_use_cmd:
+                reply = "❌ 该命令仅限群主/群管理员或插件配置管理员使用"
+            elif len(args) < 1:
+                reply = (
+                    "❌ 命令格式错误\n"
+                    "💡 用法：/cmd [子服编号] <控制台命令>\n"
+                    "💡 例如：/cmd say hello、/cmd stop、/cmd 2 list"
+                )
+            else:
+                reply = _run_server_console_command(" ".join(args))
 
-                try:
-
-                    # 创建一个队列来接收主线程的执行结果
-                    result_queue = queue.Queue()
-
-                    language = _plugin_instance.server.language
-
-                    def on_message(msg):
-                        if isinstance(msg, str):
-                            msg_ret.append(msg)
-                        else:
-                            try:
-                                translated = language.translate(msg, language.locale)
-                                msg_ret.append(translated)
-                            except Exception as e:
-                                msg_ret.append(f"[消息翻译失败: {e}]")
-
-                    def on_error(err):
-                        if isinstance(err, str):
-                            error_ret.append(err)
-                        else:
-                            try:
-                                translated = language.translate(err)
-                                error_ret.append(translated)
-                            except Exception as e:
-                                error_ret.append(f"[错误翻译失败: {e}]")
-
-                    wrapper = CommandSenderWrapper(
-                        sender=_plugin_instance.server.command_sender,
-                        on_message=on_message,
-                        on_error=on_error
-                    )
-
-                    def server_thread():
-                        try:
-                            # 在主线程中执行命令
-                            success_result = _plugin_instance.server.dispatch_command(wrapper, command_to_execute)
-                            # 将结果放入队列
-                            result_queue.put((success_result, None))
-                        except Exception as e:
-                            # 如果有异常，也放入队列
-                            result_queue.put((False, str(e)))
-
-                    # 提交任务到主线程
-                    _plugin_instance.server.scheduler.run_task(_plugin_instance, server_thread, 0, 0)
-
-                    # 阻塞等待结果
-                    success, error = result_queue.get(block=True, timeout=10)  # 设置10秒超时
-
-                    if error:
-                        raise Exception(error)
-
-                    # 合并输出
-                    lines = []
-                    lines.extend(msg_ret)
-                    lines.extend([f"[ERROR] {e}" for e in error_ret])
-
-                    output_text = "\n".join(lines) if lines else "无返回值"
-                    status = "成功" if success else "失败, 请检查命令语法或权限"
-
-                    reply = f"✅ 命令已执行: /{command_to_execute}\n状态: {status}\n输出:\n{output_text}"
-
-                except queue.Empty:
-                    reply = "❌ 命令执行超时"
-                except Exception as e:
-                    reply = f"❌ 命令执行失败: {str(e)}"
-            
-            elif cmd == "who" and len(args) >= 1:
+        # === 插件配置管理员命令 ===
+        elif is_config_admin:
+            if cmd == "who" and len(args) >= 1:
                 # 查询玩家信息
                 # 修复包含空格的玩家名处理问题
                 search_input = " ".join(args)
@@ -1021,36 +993,8 @@ async def _handle_group_command(ws, user_id: int, raw_message: str, display_name
                 
                 if target_player and _plugin_instance.data_manager.unbind_player_qq(target_player, display_name):
                     reply = f"✅ 已解绑玩家 {target_player} 的QQ绑定"
-                    
-                    # 如果玩家在线，重新应用权限
-                    for player in _plugin_instance.server.online_players:
-                        if player.name == target_player:
-                            def apply_permissions():
-                                _plugin_instance.permission_manager.check_and_apply_permissions(player)
-                            _plugin_instance.server.scheduler.run_task(_plugin_instance, apply_permissions, delay=1)
-                            break
                 else:
                     reply = f"❌ 解绑失败，玩家 {target_player} 不存在或未绑定QQ"
-            
-            elif cmd == "tog_qq":
-                # 切换QQ消息转发
-                current_state = _plugin_instance.config_manager.get_config("enable_qq_to_game", True)
-                _plugin_instance.config_manager.set_config("enable_qq_to_game", not current_state)
-                _plugin_instance.config_manager.save_config()
-                
-                status = "启用" if not current_state else "禁用"
-                icon = "✅" if not current_state else "❌"
-                reply = f"{icon} QQ消息转发已{status}"
-            
-            elif cmd == "tog_game":
-                # 切换游戏消息转发
-                current_state = _plugin_instance.config_manager.get_config("enable_game_to_qq", True)
-                _plugin_instance.config_manager.set_config("enable_game_to_qq", not current_state)
-                _plugin_instance.config_manager.save_config()
-                
-                status = "启用" if not current_state else "禁用"
-                icon = "✅" if not current_state else "❌"
-                reply = f"{icon} 游戏消息转发已{status}"
             
             elif cmd == "reload":
                 # 重新加载配置
@@ -1060,31 +1004,37 @@ async def _handle_group_command(ws, user_id: int, raw_message: str, display_name
                 except Exception as e:
                     reply = f"❌ 重新加载配置失败: {str(e)}"
             
-            else:
-                reply = f"❓ 未知的管理员命令: /{cmd}\n💡 使用 /help 查看可用命令"
+            # 非本插件指令：静默忽略，避免干扰群内其他 / 指令系统
         
         else:
-            # 非管理员使用管理员命令
-            if cmd in ["cmd", "who", "ban", "unban", "banlist", "unbindqq", "tog_qq", "tog_game", "reload"]:
-                reply = "❌ 该命令仅限管理员使用"
-            else:
-                reply = f"❓ 未知命令: /{cmd}\n💡 使用 /help 查看可用命令"
+            if cmd == "cmd":
+                reply = "❌ 该命令仅限群主/群管理员或插件配置管理员使用"
+            elif cmd in ["who", "ban", "unban", "banlist", "unbindqq", "reload"]:
+                reply = "❌ 该命令仅限插件配置管理员使用"
+            # 非本插件指令：静默忽略，避免干扰群内其他 / 指令系统
         
-        # 发送回复
+        # 发送回复（服务器名单独一行，便于群内阅读）
         if reply:
-            await send_group_msg(ws, group_id, reply)
-            
+            server_name = _plugin_instance.server_name if _plugin_instance else "未知服务器"
+            await send_group_msg(ws, group_id, f"[{server_name}]\n{reply}")
+
     except Exception as e:
         if _plugin_instance:
             _plugin_instance.logger.error(f"处理群内命令失败: {e}")
-            await send_group_msg(ws, group_id, f"❌ 命令处理失败: {str(e)}")
+            server_name = _plugin_instance.server_name if _plugin_instance else "未知服务器"
+            await send_group_msg(ws, group_id, f"[{server_name}]\n❌ 命令处理失败: {str(e)}")
 
 
 async def _forward_message_to_game(message_data: dict, display_name: str):
     """转发消息到游戏"""
     try:
         # 使用新的消息解析工具来处理消息
-        from ..utils.message_utils import parse_qq_message, clean_message_text, truncate_message
+        from ..utils.message_utils import (
+            parse_qq_message,
+            clean_message_text,
+            truncate_message,
+            format_qq_group_chat_game_message,
+        )
         
         # 获取群组ID和名称
         group_id = message_data.get("group_id")
@@ -1095,25 +1045,19 @@ async def _forward_message_to_game(message_data: dict, display_name: str):
         
         # 解析QQ消息，处理emoji和CQ码
         parsed_message = parse_qq_message(message_data)
+        parsed_message = clean_message_text(parsed_message)
+        parsed_message = truncate_message(parsed_message, max_length=150)
         
-        # 构建完整的格式化消息，如果配置了群组名称则添加前缀
-        if group_name:
-            formatted_message = f"[{group_name}] {display_name}: {parsed_message}"
-        else:
-            formatted_message = f"{display_name}: {parsed_message}"
-        
-        # 清理文本并限制长度
-        clean_message = clean_message_text(formatted_message)
-        clean_message = truncate_message(clean_message, max_length=150)
-        
-        if not clean_message or parsed_message == "[空消息]":
+        if not parsed_message or parsed_message == "[空消息]":
             return
         
-        # 转发到游戏 - 使用调度器确保在主线程执行
-        game_message = f"{ColorFormat.GREEN}[QQ群] {ColorFormat.AQUA}{clean_message}{ColorFormat.RESET}"
+        # 转发到游戏 - 伪装为跨服聊天（地球Online服务器）
+        game_message = format_qq_group_chat_game_message(
+            display_name, parsed_message, group_name
+        )
         
         if _plugin_instance:
-            _plugin_instance.logger.info(f"{ColorFormat.GREEN}[QQ群] {ColorFormat.AQUA}{clean_message}{ColorFormat.RESET}")
+            _plugin_instance.logger.info(game_message)
 
             # 为webui写入聊天历史记录
             webui = _plugin_instance.server.plugin_manager.get_plugin('qqsync_webui_plugin')
@@ -1122,6 +1066,14 @@ async def _forward_message_to_game(message_data: dict, display_name: str):
                     webui.on_message_sent(sender=display_name, content=parsed_message, msg_type="chat", direction="qq_to_game")
                 except Exception as e:
                     _plugin_instance.logger.warning(f"webui on_message_sent调用失败: {e}")
+
+            # 经 ARC Sync 下发到无本机 qqsync、走主机转发的子服
+            try:
+                _plugin_instance.notify_arc_qq_chat(
+                    display_name, parsed_message, group_name
+                )
+            except Exception:
+                pass
         
         def send_to_players():
             """在主线程中发送消息给所有玩家"""
@@ -1145,116 +1097,77 @@ async def _forward_message_to_game(message_data: dict, display_name: str):
 async def handle_api_response(data: dict):
     """处理API响应"""
     try:
-        global _verification_messages
-        
-        # OneBot V11 API响应格式：{"status": "ok", "retcode": 0, "data": {...}, "echo": "..."}
         status = data.get("status")
         retcode = data.get("retcode")
         response_data = data.get("data", {})
         echo = data.get("echo", "")
-        
-        # 尝试从echo中推断action（兼容性处理）
+
         action = None
-        if echo.startswith("verification_msg:"):
-            action = "send_group_msg"
-        elif echo.startswith("get_group_member_list"):
+        if echo.startswith("get_group_member_list"):
             action = "get_group_member_list"
-        elif echo.startswith("get_stranger_info"):
-            action = "get_stranger_info"
         elif echo.startswith("set_group_card"):
             action = "set_group_card"
-        
+
         if not _plugin_instance:
             return
-        
-        # 只处理成功的API响应
-        if status == "ok" and retcode == 0 and response_data and action == "send_group_msg":
-            # 消息发送成功，保存消息ID用于撤回
-            message_id = response_data.get("message_id")
-            
-            if _plugin_instance:
-                _plugin_instance.logger.debug(f"收到send_group_msg响应: status={status}, retcode={retcode}, message_id={message_id}, echo={echo}")
-            
-            if message_id and echo.startswith("verification_msg:"):
-                # 通知verification_manager保存消息ID
-                if _plugin_instance and hasattr(_plugin_instance, 'verification_manager'):
-                    _plugin_instance.verification_manager.handle_message_response(echo, message_id)
-            elif message_id:
-                # 处理handlers中的_verification_messages（兼容性）
-                for qq_number, msg_info in _verification_messages.items():
-                    if not msg_info.get("message_id") and msg_info.get("echo") == echo:
-                        msg_info["message_id"] = message_id
-                        if _plugin_instance:
-                            _plugin_instance.logger.debug(f"通过echo匹配保存QQ {qq_number} 的验证码消息ID: {message_id}")
-                        break
+
+        if status == "ok" and retcode != 0:
+            error_msg = data.get("message", "未知错误")
+            if action == "set_group_card":
+                _plugin_instance.logger.warning(
+                    f"❌ 设置群名片失败: retcode={retcode}, msg={error_msg}, echo={echo}"
+                )
+            elif action == "get_group_member_list":
+                gid = _parse_group_id_from_member_list_echo(echo)
+                if gid is not None:
+                    _release_member_list_pending(gid)
+                _plugin_instance.logger.warning(
+                    f"❌ 获取群成员列表失败: retcode={retcode}, msg={error_msg}, echo={echo}"
+                )
             else:
-                if _plugin_instance:
-                    if not message_id:
-                        _plugin_instance.logger.warning(f"❌ send_group_msg响应中缺少message_id: {data}")
-                    elif not echo.startswith("verification_msg:"):
-                        _plugin_instance.logger.debug(f"非验证码消息响应: echo={echo}")
-        
-        elif status == "ok" and retcode != 0:
-            # API请求失败的情况
-            if _plugin_instance:
-                error_msg = data.get("message", "未知错误")
-                if action == "set_group_card":
-                    # 通知verification_manager处理失败响应，由它负责日志输出
-                    if hasattr(_plugin_instance, 'verification_manager'):
-                        _plugin_instance.verification_manager.handle_api_response(echo, "failed", {"retcode": retcode, "message": error_msg})
-                else:
-                    _plugin_instance.logger.warning(f"❌ API请求失败: retcode={retcode}, msg={error_msg}, echo={echo}")
-        
-        elif action == "get_group_member_list" and status == "ok" and retcode == 0 and response_data:
-            # 更新群成员列表
-            group_members = set()
-            for member in response_data:
-                user_id = str(member.get("user_id", ""))
-                if user_id:
-                    group_members.add(user_id)
-            
-            # 如果插件实例中有群成员集合，则更新它
-            added_count = 0
-            if hasattr(_plugin_instance, 'group_members'):
-                old_count = len(_plugin_instance.group_members)
-                _plugin_instance.group_members.update(group_members)
-                new_count = len(_plugin_instance.group_members)
-                added_count = new_count - old_count
-            
-            _plugin_instance.logger.info(f"已更新群成员列表，当前共 {len(_plugin_instance.group_members)} 人 (本次新增 {added_count} 人)")
-        
-        elif action == "get_stranger_info" and status == "ok" and retcode == 0 and response_data:
-            # 用户信息查询成功，更新昵称
-            nickname = response_data.get("nickname", "未知昵称")
-            user_id = str(response_data.get("user_id", ""))
-            
-            if _plugin_instance:
-                _plugin_instance.logger.info(f"📋 获取QQ用户信息成功: QQ={user_id}, 昵称={nickname}")
-            
-            # 查找等待昵称的确认信息
-            found = False
-            for player_name, qq_info in _plugin_instance.verification_manager.pending_qq_confirmations.items():
-                if qq_info.get("qq") == user_id:
-                    qq_info["nickname"] = nickname
-                    found = True
-                    if _plugin_instance:
-                        _plugin_instance.logger.info(f"✅ 已更新玩家 {player_name} 的QQ昵称: {nickname}")
-                    break
-            
-            if not found and _plugin_instance:
-                _plugin_instance.logger.warning(f"❌ 未找到等待QQ昵称的玩家，QQ号: {user_id}")
-                _plugin_instance.logger.debug(f"当前等待确认的玩家: {list(_plugin_instance.verification_manager.pending_qq_confirmations.keys())}")
-        
-        elif action == "get_stranger_info" and status == "ok" and retcode != 0:
-            # 用户信息查询失败
-            error_msg = data.get("msg", "未知错误")
-            if _plugin_instance:
-                _plugin_instance.logger.warning(f"获取QQ用户信息失败: retcode={retcode}, msg={error_msg}")
-        
-        # 调用verification_manager处理API响应
-        if _plugin_instance and hasattr(_plugin_instance, 'verification_manager'):
-            _plugin_instance.verification_manager.handle_api_response(echo, status, data)
-                    
+                _plugin_instance.logger.warning(
+                    f"❌ API请求失败: retcode={retcode}, msg={error_msg}, echo={echo}"
+                )
+
+        elif action == "get_group_member_list":
+            gid = _parse_group_id_from_member_list_echo(echo)
+            success = status == "ok" and retcode == 0 and isinstance(response_data, list)
+            if success:
+                members = response_data
+                group_members = set()
+                for member in members:
+                    user_id = str(member.get("user_id", ""))
+                    if user_id:
+                        group_members.add(user_id)
+
+                added_count = 0
+                if hasattr(_plugin_instance, 'group_members'):
+                    old_count = len(_plugin_instance.group_members)
+                    _plugin_instance.group_members.update(group_members)
+                    new_count = len(_plugin_instance.group_members)
+                    added_count = new_count - old_count
+
+                if gid is not None:
+                    if gid not in _plugin_instance.group_member_cards:
+                        _plugin_instance.group_member_cards[gid] = {}
+                    for member in members:
+                        uid = str(member.get("user_id", ""))
+                        if not uid:
+                            continue
+                        _plugin_instance.group_member_cards[gid][uid] = (member.get("card") or "").strip()
+                    _release_member_list_pending(gid)
+
+                if hasattr(_plugin_instance, 'group_members'):
+                    _plugin_instance.logger.info(
+                        f"已更新群成员列表，当前共 {len(_plugin_instance.group_members)} 人 (本次新增 {added_count} 人)"
+                    )
+            else:
+                if gid is not None:
+                    _release_member_list_pending(gid)
+                    _plugin_instance.logger.warning(
+                        f"获取群成员列表异常: group_id={gid}, status={status}, retcode={retcode}, echo={echo}"
+                    )
+
     except Exception as e:
         if _plugin_instance:
             _plugin_instance.logger.error(f"处理API响应失败: {e}")
@@ -1289,12 +1202,6 @@ async def handle_group_member_change(data: dict):
             player_name = _plugin_instance.data_manager.get_qq_player(user_id)
             if player_name:
                 _plugin_instance.logger.info(f"绑定玩家 {player_name} 的QQ {user_id} 退出群聊")
-                
-                # 如果玩家在线，重新应用权限
-                for player in _plugin_instance.server.online_players:
-                    if player.name == player_name:
-                        _plugin_instance.permission_manager.check_and_apply_permissions(player)
-                        break
             else:
                 _plugin_instance.logger.info(f"用户 {user_id} 退出群聊")
                 
