@@ -297,11 +297,13 @@ async def handle_message(ws, data: dict):
         bound_player = _plugin_instance.data_manager.get_qq_player(str(user_id))
         if bound_player:
             display_name = bound_player  # 使用玩家游戏ID作为显示名
-            if _plugin_instance.config_manager.get_config("sync_group_card", True):
+            if getattr(_plugin_instance, "hub_sync_group_card", True):
                 current_card = (card or "").strip()
                 if current_card != bound_player:
                     try:
-                        await set_group_card_in_all_groups(ws, int(user_id), bound_player)
+                        _plugin_instance.request_set_group_card(
+                            int(user_id), bound_player
+                        )
                     except Exception as e:
                         _plugin_instance.logger.warning(f"发言时纠正群名片失败 (QQ={user_id}, 游戏名={bound_player}): {e}")
         else:
@@ -500,6 +502,7 @@ async def _handle_group_command(
     display_name: str,
     group_id: int,
     sender: Optional[dict] = None,
+    is_config_admin: Optional[bool] = None,
 ):
     """处理群内命令"""
     try:
@@ -517,8 +520,10 @@ async def _handle_group_command(
         cmd = cmd_parts[0][1:] if cmd_parts[0].startswith('/') else cmd_parts[0]  # 去掉/前缀
         args = cmd_parts[1:] if len(cmd_parts) > 1 else []
         
-        admins = _plugin_instance.config_manager.get_config("admins", [])
-        is_config_admin = str(user_id) in admins
+        # 管理员名单由 AstrBot 中枢下发（command_forward / hub_welcome）
+        if is_config_admin is None:
+            hub_admins = getattr(_plugin_instance, "hub_admins", None) or set()
+            is_config_admin = str(user_id) in hub_admins
         is_group_admin = _is_qq_group_admin(sender)
         can_use_cmd = is_config_admin or is_group_admin
         
@@ -758,8 +763,10 @@ async def _handle_group_command(
                                 await send_group_msg_with_at(
                                     ws, group_id, int(qq_str), f"玩家 {target_player_name} 已成功绑定QQ！"
                                 )
-                                if _plugin_instance.config_manager.get_config("sync_group_card", True):
-                                    await set_group_card_in_all_groups(ws, user_id=int(qq_str), card=target_player_name)
+                                if getattr(_plugin_instance, "hub_sync_group_card", True):
+                                    _plugin_instance.request_set_group_card(
+                                        int(qq_str), target_player_name
+                                    )
                             else:
                                 reply = "❌ 绑定失败，请稍后重试或联系管理员"
         

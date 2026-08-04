@@ -45,6 +45,9 @@ class HubClient:
         catalog = welcome.get("server_catalog")
         if isinstance(catalog, list):
             self.plugin.hub_server_catalog = catalog
+        self.plugin.hub_sync_group_card = bool(welcome.get("sync_group_card", True))
+        admins = welcome.get("hub_admins") or []
+        self.plugin.hub_admins = {str(a) for a in admins}
         if my_sid is not None and isinstance(catalog, list) and catalog:
             labels = ", ".join(
                 f"[{c.get('id')}]{c.get('name')}" for c in catalog
@@ -183,19 +186,7 @@ class HubClient:
         elif msg_type == "hub_welcome":
             connected = data.get("connected_servers", [])
             self.logger.info(f"Hub 服务器列表更新: {connected}")
-            my_sid = data.get("my_server_id")
-            if my_sid is not None:
-                self.plugin.hub_numeric_server_id = my_sid
-            catalog = data.get("server_catalog")
-            if isinstance(catalog, list):
-                self.plugin.hub_server_catalog = catalog
-                if my_sid is not None:
-                    labels = ", ".join(
-                        f"[{c.get('id')}]{c.get('name')}" for c in catalog
-                    )
-                    self.logger.info(
-                        f"本机在 Hub 中的编号: {my_sid}；当前集群: {labels}"
-                    )
+            self._apply_hub_welcome_plugin_state(data)
 
         elif msg_type == "hub_transfer":
             # 旧版本机 Hub 角色转移已废弃；消息中心固定在 AstrBot。
@@ -428,7 +419,13 @@ class HubClient:
             mock_ws = MockWS()
             sender = {"role": data.get("sender_role", "member")}
             await _handle_group_command(
-                mock_ws, user_id, command_line, display_name, group_id, sender=sender
+                mock_ws,
+                user_id,
+                command_line,
+                display_name,
+                group_id,
+                sender=sender,
+                is_config_admin=bool(data.get("is_config_admin")),
             )
 
             # 将捕获的回复通过 Hub 发送到 QQ 群（回复已包含服务器名前缀）
@@ -437,6 +434,24 @@ class HubClient:
                     await self.send_api_message(reply)
         except Exception as e:
             self.logger.error(f"处理转发命令失败: {e}")
+
+    async def send_set_group_card(self, user_id, card: str) -> None:
+        """Request AstrBot hub to set QQ group card for bound players."""
+        if not self.ws:
+            return
+        try:
+            await self.ws.send(
+                json.dumps(
+                    {
+                        "type": "set_group_card",
+                        "user_id": int(user_id),
+                        "card": str(card or ""),
+                    },
+                    ensure_ascii=False,
+                )
+            )
+        except Exception as e:
+            self.logger.warning(f"发送改群名片请求失败: {e}")
 
     async def send_game_event(self, event: str, player: str = "", message: str = "",
                                session_count=None, playtime_str: str = "",

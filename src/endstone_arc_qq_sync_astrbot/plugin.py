@@ -54,9 +54,11 @@ class ArcQQSyncAstrbot(Plugin):
             # 初始化管理器
             self._init_managers()
 
-            # Hub 子服编号（由 Hub 欢迎包或本机启动 Hub 时写入）
+            # Hub 子服编号（由 Hub 欢迎包写入）
             self.hub_numeric_server_id = None
             self.hub_server_catalog = []
+            self.hub_admins: set[str] = set()
+            self.hub_sync_group_card = True
             
             # 初始化WebSocket相关
             self._init_websocket()
@@ -209,9 +211,29 @@ class ArcQQSyncAstrbot(Plugin):
 
     @property
     def server_name(self) -> str:
-        """获取服务器名称（优先配置文件，回退到 self.server.name）"""
-        configured = self.config_manager.get_config("server_name", "")
-        return configured if configured else self.server.name
+        """Hub register / QQ prefix: optional config, else Endstone server.name."""
+        configured = (self.config_manager.get_config("server_name", "") or "").strip()
+        if configured:
+            return configured
+        for attr in ("name", "level_name", "motd"):
+            val = getattr(self.server, attr, None)
+            if val and str(val).strip():
+                return str(val).strip()
+        return "Minecraft"
+
+    def request_set_group_card(self, user_id: int | str, card: str) -> None:
+        """Ask AstrBot hub to sync QQ group card (if hub enables it)."""
+        client = getattr(self, "_hub_client", None)
+        loop = getattr(self, "_loop", None)
+        if not client or not loop:
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(
+                client.send_set_group_card(user_id, card),
+                loop,
+            )
+        except Exception as e:
+            self.logger.warning(f"请求中枢改群名片失败: {e}")
 
     def get_hub_server_catalog_display(self) -> list:
         """供 QQ 命令展示：使用消息中心欢迎包中的子服目录缓存。"""
@@ -304,6 +326,7 @@ class ArcQQSyncAstrbot(Plugin):
         from .utils.message_utils import strip_minecraft_format_codes
 
         clean_display = strip_minecraft_format_codes(display_name)
+        clean_message = strip_minecraft_format_codes(message)
         # 代发子服事件时本机未必有玩家属地统计，避免错绑到主机数据
         is_remote = bool(source_server_name and source_server_name != self.server_name)
         stats = None
@@ -332,7 +355,7 @@ class ArcQQSyncAstrbot(Plugin):
                 client.send_game_event(
                     event_type,
                     player=clean_display,
-                    message=message,
+                    message=clean_message,
                     **kwargs,
                 ),
                 self._loop,

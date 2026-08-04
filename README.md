@@ -1,6 +1,6 @@
 # ARC QQ Sync (AstrBot Version)
 
-Endstone 服务器端 QQ 互通插件，通过 **AstrBot 弧光消息中心** 实现跨设备群服消息与指令联动。
+Endstone 服务器端 QQ 互通插件，通过 **AstrBot 弧光 EndStone 消息中枢** 实现跨设备群服消息与指令联动。
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Python](https://img.shields.io/badge/python-3.11+-green.svg)
@@ -13,36 +13,37 @@ Endstone 服务器端 QQ 互通插件，通过 **AstrBot 弧光消息中心** �
 ```
 QQ / 其他平台
       ↕  AstrBot 平台适配器
-AstrBot 插件「弧光消息中心」（WebSocket，默认 :19136）
+AstrBot 插件「弧光EndStone消息中枢」（WebSocket，默认 :19136）
       ↕  Hub JSON 协议
 本插件（各 MC 子服，仅客户端）
 ```
 
-- **AstrBot**：QQ 侧机器人框架，安装并启用「弧光消息中心」插件
-- **弧光消息中心**：在 AstrBot 上开启中心服务，统一对接 QQ，并向各 MC 子服转发；**QQ ↔ 游戏账号绑定**权威数据保存在中心（`data.json` / data_rpc）
-- **本插件**：安装在各 Minecraft 服务器上，连接弧光消息中心；自行上报进服 / 离服 / 聊天等事件，响应群指令；死亡播报等可由 ARCCore 通过 `api_send_event` / `api_send_raw` 调用
+- **AstrBot**：QQ 侧机器人框架，安装并启用「弧光EndStone消息中枢」插件（目录名 `astrbot_plugin_endstone_arc`）
+- **弧光 EndStone 消息中枢**：统一对接 QQ，并向各 MC 子服转发；**QQ ↔ 游戏账号绑定**权威数据保存在中枢（`data.json` / data_rpc）；群指令统一 `/mc` 前缀
+- **本插件**：安装在各 Minecraft 服务器上，只配置 `hub_host` / `hub_port` / `hub_token`（及可选 `server_name`）连接中枢；上报进服 / 离服 / 聊天等；响应剥前缀后的群指令；死亡播报等可由 ARCCore 通过 `api_send_event` 调用
 
-跨服 QQ 消息扇出由 **AstrBot 弧光消息中心** 完成，**不再经 ARCCore SyncServer 中继**。  
-游戏时长 / 进服次数由 **ARCCore** 写入本服 SQLite（`player_local_info`），本插件仅查询展示。
+跨服事件扇出由 **消息中枢固定开启**（join / quit / chat / death / custom / server_start|stop），**不再经 ARCCore SyncServer 中继**。  
+启停提示仅由子服上报的 `server_start` / `server_stop` 扇出一次（中枢不再额外广播 connected/disconnected，避免双播）。  
+游戏时长 / 进服次数由 **ARCCore** 写入跨服/本服库，本插件仅查询展示。
 
 ## 当前功能
 
 1. **消息转发**  
-   进服 / 离服 / 聊天等由本插件上报至消息中心；QQ ↔ 游戏由中心双向转发；跨子服事件由中心扇出。
+   进服 / 离服 / 聊天等由本插件上报至中枢；QQ ↔ 游戏由中枢双向转发；跨子服事件由中枢扇出。
 
 2. **指令响应**  
-   支持群内远程指令，例如 `/cmd`、`/list`、`/tps`、`/info`、`/servers` 等。已识别的 ARC 服指令会拦截，避免 AstrBot AI 再回复。
+   群内使用 `/mc help`、`/mc list`、`/mc cmd …` 等；中枢剥掉 `/mc` 后下发本插件（内部仍为 `/help`、`/list`、`/cmd`），避免与 AstrBot 自带指令冲突。
 
 3. **QQ 绑定**  
-   游戏内绑定 / 解绑 / 查询；数据经 data_rpc 读写 AstrBot 中心，不再把时长统计写入绑定 JSON。
+   游戏内绑定 / 解绑 / 查询；数据经 data_rpc 读写 AstrBot 中枢。
 
 4. **对外 API**  
-   `api_send_message` / `api_send_event` / `api_send_raw` 供 ARCCore 等插件发送群消息（如死亡、成就）。
+   `api_send_message` / `api_send_event` / `api_send_raw` 供 ARCCore 等插件发送群消息（死亡请用 `event=death`，成就可用 `custom`）。
 
 ## 前置要求
 
 - Endstone `0.11+`（Python `3.11+`）
-- 已部署并可连接的 **AstrBot 弧光消息中心**（插件目录：`astrbot_plugin_endstone_arc`）
+- 已部署并可连接的 **AstrBot 弧光 EndStone 消息中枢**（插件目录：`astrbot_plugin_endstone_arc`）
 - AstrBot 已接入 QQ（如 aiocqhttp / NapCat）
 - （推荐）同服安装 **ARCCore**：用于时长统计查询与带标题的显示名
 
@@ -64,64 +65,70 @@ AstrBot 插件「弧光消息中心」（WebSocket，默认 :19136）
 ~/bedrock_server/plugins/arc_qq_sync_astrbot/config.json
 ```
 
-与消息中心连接相关的主要项：
+**本插件连接配置**（群号、管理员、帮助、改群名片等均在 AstrBot「弧光EndStone消息中枢」）：
 
 ```json
 {
-  "server_name": "生存服",
   "hub_host": "127.0.0.1",
   "hub_port": 19136,
   "hub_token": "",
-  "cross_server_broadcast": true
+  "server_name": "弧光基岩重塑服务器"
 }
 ```
 
 | 配置项 | 说明 |
 |--------|------|
-| `server_name` | 本子服显示名称 |
-| `hub_host` / `hub_port` | AstrBot 弧光消息中心地址与端口（本机默认 `127.0.0.1:19136`；跨设备经 FRP 用公网 IP） |
-| `hub_token` | 连接令牌（与中心 `auth_token` 一致） |
-| `cross_server_broadcast` | 是否参与跨服广播（由中心扇出） |
-| `admins` | 群指令管理员 QQ 号 |
+| `hub_host` / `hub_port` | AstrBot 中枢地址与端口（本机默认 `127.0.0.1:19136`；跨设备经 FRP 用公网 IP） |
+| `hub_token` | 连接令牌（与中枢 `auth_token` 一致） |
+| `server_name` | **可选**；中枢注册名 / QQ 前缀。多服必须互不相同；留空则用 Endstone `server.name` |
+
+跨服事件扇出由中枢固定开启，无需配置。
 
 端口约定（与 ARC 部署一致时）：
 
 | 端口 | 用途 |
 |------|------|
 | **19135** | ARCCore 群服数据同步（`SYNC_SERVER_PORT` / FRP） |
-| **19136** | AstrBot 弧光消息中心（本插件 `hub_port`） |
+| **19136** | AstrBot 弧光 EndStone 消息中枢（本插件 `hub_port`） |
 
-AstrBot 弧光消息中心侧需配置：`ws_port=19136`、`target_groups`、`platform_id`。
+AstrBot 中枢侧需配置：`ws_port=19136`、`target_groups`、`admins`、`sync_group_card`、`platform_id`。
 
 ## 常用群指令
 
-| 指令 | 说明 | 权限 |
-|------|------|------|
-| `/help` | 帮助信息 | 全员 |
-| `/list` | 在线玩家 | 全员 |
-| `/tps` | TPS / MSPT | 全员 |
-| `/info` | 服务器信息 | 全员 |
-| `/servers` | 查看已连接子服（由消息中心回复） | 全员 |
-| `/cmd [子服编号] <命令>` | 执行控制台命令 | 管理员 |
-| `/who <玩家名\|QQ号>` | 查询玩家绑定与 ARCCore 游戏统计 | 管理员 |
+群内请以 **`/mc`** 开头（由消息中枢识别并转换）；下表为中枢剥前缀后本插件实际处理的指令形式。
+
+| 群内写法 | 本插件收到 | 说明 | 权限 |
+|------|------|------|------|
+| `/mc help` | `/help` | 帮助信息 | 全员 |
+| `/mc list` | `/list` | 在线玩家 | 全员 |
+| `/mc tps` | `/tps` | TPS / MSPT | 全员 |
+| `/mc info` | `/info` | 服务器信息 | 全员 |
+| `/mc servers` | `/servers` | 查看已连接子服（可由消息中枢直接回复） | 全员 |
+| `/mc cmd [子服编号] <命令>` | `/cmd …` | 执行控制台命令 | 管理员 |
+| `/mc who <玩家名\|QQ号>` | `/who …` | 查询玩家绑定与 ARCCore 游戏统计 | 管理员 |
+| `/mc 绑定 <玩家名>` | `/绑定 …` | 绑定 QQ 到游戏角色 | 全员 |
+| `/mc 重启` | `/重启` | 重启投票 | 已绑定且在线 |
 
 示例：
 
 ```text
-/cmd say 欢迎大家
-/cmd 2 list
-/who Steve
+/mc help
+/mc cmd say 欢迎大家
+/mc cmd 2 list
+/mc who Steve
+/mc 绑定 Steve
 ```
 
 ## 与 ARCCore 的分工
 
 | 职责 | 负责方 |
 |------|--------|
-| QQ ↔ MC 消息 / 跨服扇出 | AstrBot 弧光消息中心 + 本插件 |
-| QQ 账号绑定 | AstrBot 中心（本插件 data_rpc） |
-| 游戏时长 / 进服次数 | ARCCore `player_local_info`（本服库） |
-| 跨服经济 / 签到 / 密码等 | ARCCore 数据同步（`player_basic_info` 等） |
-| 死亡 / 成就等定制播报 | ARCCore 调用本插件 `api_send_*` |
+| QQ ↔ MC 消息 / 跨服扇出 | AstrBot 弧光 EndStone 消息中枢 + 本插件 |
+| QQ 账号绑定 | AstrBot 中枢（本插件 data_rpc） |
+| 游戏时长 / 进服次数 | ARCCore（跨服 `player_basic_info` 等） |
+| 跨服经济 / 签到 / 密码等 | ARCCore 数据同步 |
+| 死亡播报 | ARCCore `api_send_event("death", …)` → 本插件 → 中枢扇出 |
+| 成就等定制播报 | ARCCore `api_send_event("custom", …)` / `api_send_*` |
 
 ## 路线图
 

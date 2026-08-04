@@ -28,7 +28,7 @@ def parse_hub_command_routing(raw_message: str) -> Tuple[str, Optional[int]]:
     从群内命令中解析 Hub 子服目标编号（可选）。
     返回 (去掉编号后的完整命令行, 子服编号或 None 表示全部子服)。
 
-    规则：
+    规则（内部形式，由弧光中枢剥掉 /mc 后下发）：
     - /list /tps /info /banlist /help /reload：末尾单独的数字为子服编号；
     - /who：倒数第一个参数为编号（需至少两个参数）；
     - /cmd：第一个参数为纯数字时为子服编号，其后为控制台命令；
@@ -36,7 +36,6 @@ def parse_hub_command_routing(raw_message: str) -> Tuple[str, Optional[int]]:
     s = (raw_message or "").strip()
     if not s.startswith("/"):
         return s, None
-
     parts = s.split()
     if not parts:
         return s, None
@@ -349,8 +348,10 @@ def format_cross_server_event_game_message(data: dict, local_server_name: str):
             f"{ColorFormat.GRAY}[跨服|{from_server}] {ColorFormat.RED}{player} 离开了游戏"
         )
     if event == "death":
+        # message is usually the full QQ death line from ARCCore.
+        body = message or (f"{player} 死了" if player else "有玩家死了")
         return (
-            f"{ColorFormat.GRAY}[跨服|{from_server}] {ColorFormat.YELLOW}{player} {message}"
+            f"{ColorFormat.GRAY}[跨服|{from_server}] {ColorFormat.YELLOW}{body}"
         )
     if event in ("server_start", "server_connected"):
         return (
