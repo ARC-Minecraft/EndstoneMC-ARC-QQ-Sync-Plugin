@@ -8,6 +8,15 @@ Endstone 服务器端 QQ 互通插件，通过 **AstrBot 弧光 EndStone 消息�
 
 仓库：[ARC-Minecraft/EndstoneMC-ARC-QQ-Sync-Plugin](https://github.com/ARC-Minecraft/EndstoneMC-ARC-QQ-Sync-Plugin)
 
+## 配套依赖
+
+本插件与 AstrBot 中枢**成对使用**，缺一不可：
+
+| 组件 | 仓库 |
+|------|------|
+| **本仓库（MC 子服客户端）** | [EndstoneMC-ARC-QQ-Sync-Plugin](https://github.com/ARC-Minecraft/EndstoneMC-ARC-QQ-Sync-Plugin) |
+| **AstrBot 弧光 EndStone 消息中枢** | [AstrBot-ARC-EndStoneMC-Hub](https://github.com/ARC-Minecraft/AstrBot-ARC-EndStoneMC-Hub) |
+
 ## 架构说明
 
 ```
@@ -18,7 +27,7 @@ AstrBot 插件「弧光EndStone消息中枢」（WebSocket，默认 :19136）
 本插件（各 MC 子服，仅客户端）
 ```
 
-- **AstrBot**：QQ 侧机器人框架，安装并启用「弧光EndStone消息中枢」插件（目录名 `astrbot_plugin_endstone_arc`）
+- **AstrBot**：QQ 侧机器人框架，安装并启用 [弧光EndStone消息中枢](https://github.com/ARC-Minecraft/AstrBot-ARC-EndStoneMC-Hub)（目录名 `astrbot_plugin_endstone_arc`）
 - **弧光 EndStone 消息中枢**：统一对接 QQ，并向各 MC 子服转发；**QQ ↔ 游戏账号绑定**权威数据保存在中枢（`data.json` / data_rpc）；群指令统一 `/mc` 前缀
 - **本插件**：安装在各 Minecraft 服务器上，只配置 `hub_host` / `hub_port` / `hub_token`（及可选 `server_name`）连接中枢；上报进服 / 离服 / 聊天等；响应剥前缀后的群指令；死亡播报等可由 ARCCore 通过 `api_send_event` 调用
 
@@ -43,7 +52,7 @@ AstrBot 插件「弧光EndStone消息中枢」（WebSocket，默认 :19136）
 ## 前置要求
 
 - Endstone `0.11+`（Python `3.11+`）
-- 已部署并可连接的 **AstrBot 弧光 EndStone 消息中枢**（插件目录：`astrbot_plugin_endstone_arc`）
+- 已部署并可连接的 **[AstrBot 弧光 EndStone 消息中枢](https://github.com/ARC-Minecraft/AstrBot-ARC-EndStoneMC-Hub)**（插件目录：`astrbot_plugin_endstone_arc`）
 - AstrBot 已接入 QQ（如 aiocqhttp / NapCat）
 - （推荐）同服安装 **ARCCore**：用于时长统计查询与带标题的显示名
 
