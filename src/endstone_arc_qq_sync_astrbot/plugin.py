@@ -75,7 +75,7 @@ class ArcQQSyncAstrbot(Plugin):
             # 启动消息
             startup_msg = f"{ColorFormat.GREEN}arc_qq_sync_astrbot {ColorFormat.YELLOW}已启用{ColorFormat.RESET}"
             self.logger.info(startup_msg)
-            welcome_msg = f"{ColorFormat.BLUE}欢迎使用ARC QQ Sync (AstrBot Version)，{ColorFormat.YELLOW}作者：yuexps{ColorFormat.RESET}"
+            welcome_msg = f"{ColorFormat.BLUE}欢迎使用ARC QQ Sync (AstrBot Version)，{ColorFormat.YELLOW}作者：DEVILENMO / ARC-Minecraft{ColorFormat.RESET}"
             self.logger.info(welcome_msg)
             
         except Exception as e:
