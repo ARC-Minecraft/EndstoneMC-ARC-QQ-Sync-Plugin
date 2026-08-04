@@ -137,6 +137,16 @@ AstrBot 中枢侧需配置：`ws_port=19136`、`target_groups`、`admins`、`syn
 - [x] 跨服 QQ 中继移出 ARCCore，由消息中心扇出
 - [x] 玩家时长 / 次数迁至 ARCCore SQLite；绑定权威在 AstrBot
 
+## 致谢
+
+本项目早期参考了 [yuexps/endstone-qqsync-plugin](https://github.com/yuexps/endstone-qqsync-plugin)
+（MIT），感谢：
+
+- [@yuexps](https://github.com/yuexps)
+- [@yuhangle](https://github.com/yuhangle)（yuhang2006）
+
+后续实现已面向 AstrBot 弧光 EndStone 消息中枢与 ARC 多服架构大幅重写，与上游不再共享同一套协议与职责划分；此处致谢其开源工作与早期启发。
+
 ## 许可证
 
-MIT
+本仓库以 [MIT License](LICENSE) 发布。

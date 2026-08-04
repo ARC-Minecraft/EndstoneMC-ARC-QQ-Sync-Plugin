@@ -9,9 +9,9 @@ description = "ARC QQ Sync (AstrBot Version) - Endstone 子服插件，连接弧
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [
-    { name = "yuexps", email = "yuexps@qq.com" },
+    { name = "DEVILENMO", email = "DEVILENMO@gmail.com" },
 ]
-
+license = "MIT"
 [project.urls]
 Homepage = "https://github.com/ARC-Minecraft/EndstoneMC-ARC-QQ-Sync-Plugin"
 
