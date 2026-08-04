@@ -22,8 +22,7 @@ AstrBot 插件「弧光EndStone消息中枢」（WebSocket，默认 :19136）
 - **弧光 EndStone 消息中枢**：统一对接 QQ，并向各 MC 子服转发；**QQ ↔ 游戏账号绑定**权威数据保存在中枢（`data.json` / data_rpc）；群指令统一 `/mc` 前缀
 - **本插件**：安装在各 Minecraft 服务器上，只配置 `hub_host` / `hub_port` / `hub_token`（及可选 `server_name`）连接中枢；上报进服 / 离服 / 聊天等；响应剥前缀后的群指令；死亡播报等可由 ARCCore 通过 `api_send_event` 调用
 
-跨服事件扇出由 **消息中枢固定开启**（join / quit / chat / death / custom / server_start|stop），**不再经 ARCCore SyncServer 中继**。  
-启停提示仅由子服上报的 `server_start` / `server_stop` 扇出一次（中枢不再额外广播 connected/disconnected，避免双播）。  
+跨服事件扇出由 **消息中枢固定开启**（join / quit / chat / death / custom / server_start|stop，以及中枢侧的 server_connected|disconnected），**不再经 ARCCore SyncServer 中继**。  
 游戏时长 / 进服次数由 **ARCCore** 写入跨服/本服库，本插件仅查询展示。
 
 ## 当前功能
