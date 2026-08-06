@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "endstone-arc-qq-sync-astrbot"
-version = "1.0.0"
+version = "1.0.1"
 description = "ARC QQ Sync (AstrBot Version) - Endstone 子服插件，连接弧光消息中心实现群服互通"
 readme = "README.md"
 requires-python = ">=3.11"

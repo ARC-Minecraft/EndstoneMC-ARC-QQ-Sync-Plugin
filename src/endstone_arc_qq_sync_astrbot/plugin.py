@@ -356,6 +356,7 @@ class ArcQQSyncAstrbot(Plugin):
                     event_type,
                     player=clean_display,
                     message=clean_message,
+                    raw_player_name=str(raw_player_name or "").strip(),
                     **kwargs,
                 ),
                 self._loop,

@@ -388,6 +388,7 @@ class HubClient:
         user_id = data.get("user_id")
         display_name = data.get("display_name", "")
         group_id = data.get("group_id")
+        silent = bool(data.get("silent"))
 
         if not raw_message or not raw_message.startswith("/"):
             return
@@ -429,6 +430,8 @@ class HubClient:
             )
 
             # 将捕获的回复通过 Hub 发送到 QQ 群（回复已包含服务器名前缀）
+            if silent:
+                return
             for reply in captured_replies:
                 if reply:
                     await self.send_api_message(reply)
@@ -455,10 +458,12 @@ class HubClient:
 
     async def send_game_event(self, event: str, player: str = "", message: str = "",
                                session_count=None, playtime_str: str = "",
-                               source_server_name: str = None):
+                               source_server_name: str = None,
+                               raw_player_name: str = ""):
         """发送游戏事件到 Hub。
 
         :param source_server_name: 可选；代发时覆盖 payload 中的 server_name。
+        :param raw_player_name: 可选；裸玩家名（无头衔），供中枢绑定/处罚。
         """
         if not self.ws:
             self.logger.warning("Hub 未连接，无法发送事件")
@@ -475,6 +480,8 @@ class HubClient:
             payload["session_count"] = session_count
         if playtime_str:
             payload["playtime_str"] = playtime_str
+        if raw_player_name:
+            payload["raw_player_name"] = str(raw_player_name).strip()
 
         try:
             await self.ws.send(json.dumps(payload))
